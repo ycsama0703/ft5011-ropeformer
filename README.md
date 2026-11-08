@@ -86,15 +86,28 @@ R 为正交矩阵，故旋转保持 Q/K 向量范数。新增可学习参数为 
 
 | rope_mode | 每层可学习尺度数 | 含义 |
 | --- | --- | --- |
+| none | 0 | 诊断用 NoPE：不旋转，不属于主比较 |
 | standard | 0 | 标准固定 RoPE |
 | fixed_head | 0 | 固定 per-head 尺度，手动给初值 |
 | head | H | 原方案，每头一个可学习尺度 |
 | shared_group | G | 分组尺度在同层各 head 间共享 |
 | grouped | H x G | 主方法，每头每组分别学习 |
 
-各模式使用同一套编码器、输入投影、池化、预测头。G=1 时 grouped 等价于 head。G>1 的组在训练后可能交叉，high/low 只表示初始基础频率分组，不保证有效频率始终有序。
+各模式使用同一套编码器、输入投影、预测头，只在 log_scales 上不同。G=1 时 grouped 等价于 head。G>1 的组在训练后可能交叉，high/low 只表示初始基础频率分组，不保证有效频率始终有序。
 
 默认所有尺度为 1，包括 fixed_head。因此非平凡固定对照应显式使用 `head_scale_init=(0.5, 0.8, 1.25, 2.0)`（四个 head）。该初始化只接受 head/fixed_head；不要把固定对照与学习对照的初值混为一谈。
+
+### 预测头
+
+| forecast_head | 结构 | 角色 |
+| --- | --- | --- |
+| horizon_tokens（默认） | 历史后追加 H 个共享的可学习占位 token（位置 L..L+H-1），逐 token 线性读出 | 主骨架：RoPE 直接决定未来各步看历史的哪些相对距离 |
+| pooled | mean/last pooling 后一次性线性输出 H 步 | 消融：RoPE 只作用于历史内部 |
+
+horizon_tokens 的注意力掩码：历史只看历史（causal=True 时为下三角）；占位只看全部历史和自身，
+不看其他占位。因此历史表示与 H 无关，第 h 步预测与总预测长度无关，`model(x, horizon=H')`
+可直接用于预测长度外推。占位不含任何未来观测，没有标签泄露。设计动机与依据见
+[docs/plan_horizon_tokens.md](docs/plan_horizon_tokens.md)。
 
 ## 6. 安装与快速验证
 
@@ -134,7 +147,7 @@ loss.backward()
 
 接口为 `[batch, history, input_dim] -> [batch, horizon, output_dim]`。output_dim 默认等于 input_dim；可显式配置其他输出维度，调用者负责正确构造标签。
 
-默认 mean pooling；可选 last pooling。编码器默认不使用因果 mask，因为输入全部是预测起点之前已知的历史；它不接收未来标签。可设置 causal=True 做因果编码器对照，所有实验应保持该设置一致。无 decoder、外生 cross-attention、方向或分布预测头。
+默认 forecast_head="horizon_tokens"；`model(x, horizon=96)` 可在推理时改变预测长度。pooled 头需显式设置 `forecast_head="pooled"`，可选 `pooling="mean"`（默认）或 `"last"`；在 horizon_tokens 下设置 pooling 会报错。历史部分默认不使用因果 mask，因为输入全部是预测起点之前已知的历史；可设置 causal=True 做因果对照，所有实验应保持该设置一致。无独立 decoder、外生 cross-attention、方向或分布预测头。
 
 输入/目标的归一化与反归一化由外部数据流程负责，模型内部不偷偷改变目标定义。
 
@@ -143,7 +156,7 @@ model.eval()
 with torch.no_grad():
     forecast, maps = model(x, return_attention=True)
     info = model.rope_diagnostics()
-# maps: 每层一个 [batch, heads, history, history]，已 detach
+# maps: 每层一个 [batch, heads, T, T]，已 detach；horizon_tokens 下 T=history+horizon，pooled 下 T=history
 # info: 每层的 scales、group_index、frequencies、periods
 ```
 
@@ -156,13 +169,20 @@ with torch.no_grad():
 - 指数参数化保证正值，不保证优化永远稳定；过大频率还可能产生离散采样混叠。
 - 不默认添加尺度分离损失。尺度相似可能是合理解，不能为了好看的图强迫 head 分工。
 - 未引入 FFT 条件网络、动态尺度、可学习分组边界或滤波器。不要把讨论过的扩展说成已实现。
-- 当前有 CPU 验证；没有 GPU 验证，也没有真实数据预测结果。
+- 单元测试在 CPU 上运行；合成实验脚本在本机 CUDA GPU 上跑过，但没有 GPU 单元测试或 CI 结果，也没有真实数据预测结果。
 
 合成示例生成独立的训练/验证/测试序列，用验证集选择最佳状态，最后只评估测试集。不用于方法优劣结论：周期固定且任务较简单。
 
 ```bash
 python examples/train_synthetic.py --checkpoint results/demo.pt
 python tools/check_rope_spectrum.py --checkpoint results/demo.pt
+```
+
+多尺度机制检查（固定、随机周期、漂移、状态切换四种合成任务；所有模式同一 base 搜索预算；
+记录 log-scale 轨迹；可评估训练长度以外的预测步）。同样只是机制检查，不是基准结果：
+
+```bash
+python examples/synthetic_multiscale.py --task regime_switch --eval-horizons 48 96 144
 ```
 
 ## 9. 仓库结构与下一步
@@ -175,15 +195,18 @@ GroupedRoPE/
   requirements.txt
   src/grouped_rope/
     __init__.py
-    model.py                通用预测器与五种位置编码配置
+    model.py                通用预测器、两种预测头与位置编码配置
   tests/test_model.py       数学性质、梯度和模型接口测试
   tools/
     smoke_test.py
     check_rope_spectrum.py
-  examples/train_synthetic.py
+  examples/
+    train_synthetic.py      最小合成训练示例
+    synthetic_multiscale.py 多尺度合成机制检查与预测长度外推
   docs/
     experiments.md          假设、对照、数据划分与评价方案
     implementation.md      具体实现与旧代码迁移说明
+    plan_horizon_tokens.md  占位 token 预测头的设计依据
   .github/workflows/tests.yml
 ```
 

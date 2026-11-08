@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grouped-rope"
-version = "0.1.0"
+version = "0.2.0"
 description = "Grouped learnable RoPE frequencies for time-series forecasting"
 requires-python = ">=3.10"
 dependencies = ["torch>=2.0"]

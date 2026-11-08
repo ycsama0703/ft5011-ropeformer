@@ -6,7 +6,7 @@ import sys
 import unittest
 import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from grouped_rope import GroupedRotaryEmbedding, GroupedRoPEForecaster, ForecastConfig
+from grouped_rope import GroupedRotaryEmbedding, GroupedRoPEForecaster, ForecastConfig, horizon_token_mask
 
 
 def cfg(**kwargs):
@@ -72,30 +72,32 @@ class RotaryTests(unittest.TestCase):
         rotary = GroupedRotaryEmbedding(cfg(n_freq_groups=3))
         sizes = torch.bincount(rotary.group_index)
         self.assertEqual(int(sizes.max() - sizes.min()), 1)
-        for mode, count in [("standard", 0), ("fixed_head", 0), ("head", 6), ("shared_group", 4), ("grouped", 12)]:
+        for mode, count in [("none", 0), ("standard", 0), ("fixed_head", 0), ("head", 6), ("shared_group", 4), ("grouped", 12)]:
             model = GroupedRoPEForecaster(cfg(rope_mode=mode))
             self.assertEqual(sum(p.numel() for n, p in model.named_parameters() if n.endswith("log_scales")), count)
 
 
 class ModelTests(unittest.TestCase):
     def test_output_backward_and_attention_parity(self):
-        for causal in (False, True):
-            model = GroupedRoPEForecaster(cfg(input_dim=3, output_dim=2, horizon=7, causal=causal)).eval()
-            x = torch.randn(2, 19, 3)
-            plain = model(x)
-            traced, maps = model(x, return_attention=True)
-            self.assertEqual(tuple(plain.shape), (2, 7, 2))
-            torch.testing.assert_close(plain, traced, atol=1e-6, rtol=1e-5)
-            self.assertEqual(len(maps), 2)
-            self.assertFalse(maps[0].requires_grad)
-            torch.testing.assert_close(maps[0].sum(-1), torch.ones(2, 3, 19))
-            if causal:
-                self.assertTrue((maps[0].triu(1) == 0).all())
-            plain.square().mean().backward()
-            self.assertTrue(all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters()))
+        for head in ("horizon_tokens", "pooled"):
+            for causal in (False, True):
+                model = GroupedRoPEForecaster(cfg(input_dim=3, output_dim=2, horizon=7, causal=causal, forecast_head=head)).eval()
+                x = torch.randn(2, 19, 3)
+                plain = model(x)
+                traced, maps = model(x, return_attention=True)
+                self.assertEqual(tuple(plain.shape), (2, 7, 2))
+                torch.testing.assert_close(plain, traced, atol=1e-6, rtol=1e-5)
+                self.assertEqual(len(maps), 2)
+                self.assertFalse(maps[0].requires_grad)
+                length = 19 + 7 if head == "horizon_tokens" else 19
+                torch.testing.assert_close(maps[0].sum(-1), torch.ones(2, 3, length))
+                if causal:
+                    self.assertTrue((maps[0].triu(1) == 0).all())
+                plain.square().mean().backward()
+                self.assertTrue(all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters()))
 
     def test_save_load(self):
-        model = GroupedRoPEForecaster(cfg(input_dim=2, pooling="last")).eval()
+        model = GroupedRoPEForecaster(cfg(input_dim=2, forecast_head="pooled", pooling="last")).eval()
         with torch.no_grad():
             model.blocks[0].attention.rotary.log_scales.fill_(0.3)
         buffer = io.BytesIO()
@@ -110,6 +112,14 @@ class ModelTests(unittest.TestCase):
         for kwargs in ({"d_model": 25}, {"n_freq_groups": 10}, {"rope_base": 1}, {"dropout": 1}, {"input_dim": 0}, {"rope_mode": "unknown"}):
             with self.assertRaises(ValueError):
                 cfg(**kwargs) if "d_model" not in kwargs else ForecastConfig(**kwargs)
+        for kwargs in ({"pooling": "mean"}, {"forecast_head": "decoder"}):
+            with self.assertRaises(ValueError):
+                cfg(**kwargs)
+        with self.assertRaises(ValueError):
+            GroupedRoPEForecaster(cfg(forecast_head="pooled"))(torch.randn(2, 5, 1), horizon=3)
+        for horizon in (0, 2.0):
+            with self.assertRaises(ValueError):
+                GroupedRoPEForecaster(cfg())(torch.randn(2, 5, 1), horizon=horizon)
         with self.assertRaises(TypeError):
             GroupedRoPEForecaster(ff_mult=2)
         with self.assertRaises(TypeError):
@@ -125,6 +135,78 @@ class ModelTests(unittest.TestCase):
                 loss = forecast.float().square().mean()
             loss.backward()
         self.assertTrue(torch.isfinite(forecast).all())
+
+
+class HorizonTokenTests(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(11)
+
+    def trained_like(self, **kwargs):
+        model = GroupedRoPEForecaster(cfg(input_dim=2, horizon=6, **kwargs)).eval()
+        for name, param in model.named_parameters():
+            if name.endswith("log_scales"):
+                with torch.no_grad():
+                    param.copy_(torch.randn_like(param) * 0.3)
+        return model
+
+    def test_mask_structure(self):
+        mask = horizon_token_mask(4, 3, causal=False)
+        expected = torch.tensor([
+            [1, 1, 1, 1, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0],
+            [1, 1, 1, 1, 1, 0, 0],
+            [1, 1, 1, 1, 0, 1, 0],
+            [1, 1, 1, 1, 0, 0, 1],
+        ], dtype=torch.bool)
+        self.assertTrue(torch.equal(mask, expected))
+        causal = horizon_token_mask(4, 3, causal=True)
+        self.assertTrue(torch.equal(causal[:4, :4], torch.ones(4, 4, dtype=torch.bool).tril()))
+        self.assertTrue(torch.equal(causal[4:], expected[4:]))
+
+    def test_forecast_prefix_independent_of_horizon(self):
+        for causal in (False, True):
+            model = self.trained_like(causal=causal)
+            x = torch.randn(3, 17, 2)
+            short, long = model(x, horizon=4), model(x, horizon=11)
+            torch.testing.assert_close(short, long[:, :4])
+            self.assertEqual(tuple(long.shape), (3, 11, 2))
+
+    def test_history_attention_independent_of_horizon(self):
+        model = self.trained_like()
+        x = torch.randn(2, 13, 2)
+        _, short = model(x, horizon=3, return_attention=True)
+        _, long = model(x, horizon=9, return_attention=True)
+        for a, b in zip(short, long):
+            torch.testing.assert_close(a[..., :13, :13], b[..., :13, :13])
+            self.assertTrue((b[..., :13, 13:] == 0).all())
+            future = b[..., 13:, 13:]
+            self.assertTrue((future - torch.diag_embed(future.diagonal(dim1=-2, dim2=-1)) == 0).all())
+
+    def test_nope_gives_constant_forecast_over_horizon(self):
+        model = self.trained_like(rope_mode="none")
+        forecast = model(torch.randn(2, 15, 2), horizon=5)
+        torch.testing.assert_close(forecast, forecast[:, :1].expand_as(forecast))
+
+    def test_rope_distinguishes_future_steps(self):
+        forecast = self.trained_like()(torch.randn(2, 15, 2), horizon=5)
+        self.assertGreater((forecast - forecast[:, :1]).abs().max().item(), 1e-4)
+
+    def test_parameter_count_independent_of_horizon(self):
+        count = lambda h: sum(p.numel() for p in GroupedRoPEForecaster(cfg(horizon=h)).parameters())
+        self.assertEqual(count(3), count(50))
+
+    def test_modes_differ_only_in_log_scales(self):
+        shapes = {}
+        for mode in ("none", "standard", "head", "shared_group", "grouped"):
+            torch.manual_seed(0)
+            model = GroupedRoPEForecaster(cfg(rope_mode=mode))
+            shapes[mode] = {n: p.detach().clone() for n, p in model.named_parameters() if not n.endswith("log_scales")}
+        for mode, params in shapes.items():
+            self.assertEqual(params.keys(), shapes["standard"].keys())
+            for name, value in params.items():
+                torch.testing.assert_close(value, shapes["standard"][name], msg=f"{mode}: {name}")
 
 
 if __name__ == "__main__":

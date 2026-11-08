@@ -22,6 +22,10 @@
 | D | grouped, G=2 | 主方法 |
 | E（可选） | grouped, G=4 | 组数消融 |
 
+所有对照默认使用 horizon_tokens 预测头（见 docs/plan_horizon_tokens.md）。pooled 头
+仅用于"预测头消融"：同一 RoPE 模式在两种头下的差别，用于判断 RoPE 是否只有在参与
+外推时才重要。rope_mode="none"（NoPE）只作诊断。
+
 fixed_head 是可用的额外控制，必须明确写出非平凡初值。A-D 默认相同零 log-scale
 初始化，避免初值本身混淆结论。保持其他参数初值尽量配对，使用相同随机种子。
 
@@ -37,6 +41,11 @@ fixed_head 是可用的额外控制，必须明确写出非平凡初值。A-D �
 
 examples/train_synthetic.py 只是固定 12/32 步周期、随机相位/幅度的双周期
 管线示例，不能替代上述完整的机制实验。
+
+examples/synthetic_multiscale.py 提供四种任务：fixed、random_period、quasi_periodic、
+regime_switch。在旧的 pooled 骨架上已观察到（仅机制检查，非证据）：fixed 被线性模型
+解到噪声水平；quasi_periodic 上线性与 Transformer 持平；各模式差距小于种子波动；
+所有 log-scale 仅移动到 0.7–1.2 倍。这是改用 horizon_tokens 头的直接原因。
 
 ### 真实预测实验（待实现）
 
@@ -58,7 +67,9 @@ examples/train_synthetic.py 只是固定 12/32 步周期、随机相位/幅度�
 - MSE loss；验证集选最佳状态/早停。报告测试 MSE 和 MAE。
 - 3 个配对随机种子起步，资源允许时增加到 5 个；报告均值和标准差。
 - 相同训练步数上限、batch size、优化器、学习率候选与早停耐心。
-- 给所有版本同样的 RoPE base 调参预算，随后冻结设置。
+- 给所有版本同样的 RoPE base 调参预算，随后冻结设置。合成实验默认网格 {1000, 10000}。
+- 学习率 linear warmup + cosine decay，所有模式相同。
+- 记录 log-scale 轨迹，先确认尺度是否真正移动，再解释模式差异。
 - log_scales 默认无 weight decay；若使用单独学习率，应记录并公平调参。
 - CPU/GPU、软件版本、耗时与训练参数量一起记录。
 - 不默认加强迫尺度分离的损失；如后续添加，独立做消融。
@@ -71,6 +82,9 @@ examples/train_synthetic.py 只是固定 12/32 步周期、随机相位/幅度�
 3. 有效频率布局及组间比例改变。
 4. 按时间距离汇总的注意力，配合不同滞后区间遮挡实验。
 5. 参数量、训练/推理耗时；更多组是否值得。
+6. 预测长度外推：用 H_train 训练，测试 H > H_train（仅 horizon_tokens 头可做），
+   报告逐步误差曲线。
+7. 注意力贡献诊断：将注意力替换为零/单位矩阵、逐频带置零，判断改进是否来自 RoPE。
 
 period=2*pi/frequency 只描述位置旋转。attention 图和参数差异不能独立证明
 真实周期恢复、重要性或因果关系。
@@ -86,7 +100,8 @@ period=2*pi/frequency 只描述位置旋转。attention 图和参数差异不能
 
 ## 推荐实施顺序
 
-1. 已完成：通用模型、五种模式、数学测试、合成训练示例。
+1. 已完成：通用模型、五种模式（另加 NoPE 诊断）、两种预测头、数学测试、合成训练示例、
+   多尺度合成机制检查脚本。
 2. 待完成：统一真实数据接口与训练集标准化。
 3. 待完成：共享训练/评估入口与线性/LSTM baseline。
 4. 待完成：A-D 配对种子实验与结果表。

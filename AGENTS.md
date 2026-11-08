@@ -59,7 +59,11 @@ which platforms were tested; do not imply CUDA/CI verification from CPU tests.
 
 ## State and workflow
 
-- Model, tests, diagnostics and synthetic demo exist.
+- Model, tests, diagnostics and synthetic demo exist. Default forecast head is
+  horizon_tokens (placeholder tokens + structured mask, see
+  docs/plan_horizon_tokens.md); pooled is kept only as a head ablation and
+  rope_mode="none" only as a NoPE diagnostic. Keep the horizon-independence
+  and history-independence invariants tested.
 - Real benchmark loaders, shared benchmark training runner, linear/LSTM baselines
   and benchmark results are not yet implemented.
 - Keep checkpoints/data/results out of Git. Never commit tokens or .env files.

@@ -5,11 +5,12 @@ from pathlib import Path
 import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from grouped_rope import GroupedRoPEForecaster
+from grouped_rope.model import ROPE_MODES
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["standard", "fixed_head", "head", "shared_group", "grouped"], default="grouped")
+    parser.add_argument("--mode", choices=ROPE_MODES, default="grouped")
     parser.add_argument("--groups", type=int, default=2)
     parser.add_argument("--base", type=float, default=10000.0)
     parser.add_argument("--checkpoint", type=Path, help="Checkpoint containing config and state_dict")

@@ -16,12 +16,26 @@ model.py 中按顺序包含：
 
 - ForecastConfig：集中配置与校验；默认两层、四头、d_model=64、d_ff=128。
 - GroupedRotaryEmbedding：基础频率 buffer、固定组归属、log-scale 与直接旋转。
-- MultiHeadAttentionRoPE：QKV 投影、旋转、SDPA；显式诊断时返回 attention。
+- MultiHeadAttentionRoPE：QKV 投影、旋转、带可选布尔掩码的 SDPA；显式诊断时返回 attention。
 - EncoderBlock：标准 pre-norm 残差块，Q/K/V 都来自同一个归一化后的输入。
-- GroupedRoPEForecaster：输入投影、encoder、输出 norm、mean/last pooling、直接预测。
+- horizon_token_mask：占位 token 头使用的注意力掩码。
+- GroupedRoPEForecaster：输入投影、（可选）占位 token、encoder、输出 norm、预测头。
 
-没有 decoder。历史窗口内默认双向注意力是合法的，因为所有输入都在预测起点
-之前；严格因果 encoder 通过 causal=True 启用。这不代替正确的数据切分。
+预测头有两种：
+
+- horizon_tokens（默认）：历史 token 后追加 H 个共享的可学习占位向量，位置为
+  L..L+H-1。掩码规则：历史只看历史（causal=True 时下三角）；占位只看全部历史与
+  自身。最后一层占位输出经共享 Linear(d_model, output_dim) 逐步读出。参数量与 H 无关；
+  forward(x, horizon=H') 可改变推理时的预测长度。占位不含未来观测，不泄露标签。
+  占位用可学习向量而非"数值 0 经输入投影"，因为标准化后 0 是合法观测值。
+- pooled：mean/last pooling 后 Linear(d_model, H*output_dim)，作为消融保留。
+  pooling 只能在此头下设置；forward 不接受 horizon 覆盖。
+
+没有独立 decoder。历史窗口内默认双向注意力是合法的，因为所有输入都在预测起点
+之前；严格因果版本通过 causal=True 启用。这不代替正确的数据切分。
+
+rope_mode="none" 是诊断用 NoPE：有效频率为 0、旋转为恒等。在 horizon_tokens 下
+所有占位输出相同，预测在各步上为常数，用于说明位置信息的作用；不属于主比较。
 
 ## 参数化
 
@@ -59,8 +73,11 @@ rope_diagnostics() 返回 detached 副本。频率单位 rad/step；period 单�
 ## 验证范围
 
 测试覆盖初始标准 RoPE 等价、原方法退化、范数保持、相对位置、超窗口尺度、
-每组梯度、组数参数量、保存恢复、诊断路径与 SDPA 路径一致、因果 mask、
-输入配置校验和 CPU autocast。
+每组梯度、组数参数量、保存恢复、诊断路径与 SDPA 路径一致（两种预测头、含掩码）、
+因果 mask、输入配置校验和 CPU autocast。占位 token 头另有：掩码结构、预测前缀与
+总预测长度无关、历史注意力与预测长度无关、NoPE 下预测为常数、RoPE 区分未来各步、
+参数量与预测长度无关、各模式除 log_scales 外初始化完全相同。
 
 CPU bf16 测试关闭 oneDNN 后运行，避免本机 CPU 对 bf16 backward 的指令支持
-限制；不代表默认 oneDNN 路径或 CUDA 已通过。没有 GPU 或真实 benchmark 结果。
+限制；不代表默认 oneDNN 路径已通过。单元测试只在 CPU 上运行；合成实验脚本在本机
+CUDA GPU 上运行过前向/反向训练，但没有 GPU 单元测试或 CI。没有真实 benchmark 结果。

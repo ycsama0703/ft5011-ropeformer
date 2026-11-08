@@ -7,6 +7,11 @@ rope_base search? Each mode picks its base by mean validation MSE; test MSE is
 reported only for that choice. A linear lookback->horizon model is included
 as a backbone sanity reference, not as a RoPE variant.
 
+With --head horizon_tokens and --eval-horizons, test windows are also scored
+beyond the training horizon (the model is called with a longer horizon); this
+measures horizon extrapolation. Log-scale trajectories are recorded at every
+validation check so it is visible whether the frequency scales actually move.
+
 Mechanism experiment only; synthetic results are not benchmark evidence.
 """
 import argparse
@@ -22,6 +27,7 @@ from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from grouped_rope import GroupedRoPEForecaster
+from grouped_rope.model import ROPE_MODES
 
 MODES = ("standard", "head", "shared_group", "grouped")
 
@@ -81,14 +87,21 @@ class LinearForecaster(nn.Module):
 
 
 @torch.no_grad()
-def evaluate(model, x, y, chunk=256):
+def step_errors(model, x, y, horizon=None, chunk=256):
+    """Per-step mean squared and absolute errors over all windows (no drop_last)."""
     model.eval()
+    kwargs = {} if horizon is None else {"horizon": horizon}
     sq, ab = 0.0, 0.0
-    for i in range(0, x.shape[0], chunk):  # every window is scored; no drop_last
-        error = model(x[i:i + chunk]) - y[i:i + chunk]
-        sq += error.square().sum().item()
-        ab += error.abs().sum().item()
-    return sq / y.numel(), ab / y.numel()
+    for i in range(0, x.shape[0], chunk):
+        error = model(x[i:i + chunk], **kwargs) - y[i:i + chunk]
+        sq = sq + error.square().sum(dim=(0, 2))
+        ab = ab + error.abs().sum(dim=(0, 2))
+    return sq / (y.shape[0] * y.shape[2]), ab / (y.shape[0] * y.shape[2])
+
+
+def evaluate(model, x, y):
+    sq, ab = step_errors(model, x, y)
+    return sq.mean().item(), ab.mean().item()
 
 
 def train(model, data, args, seed, device):
@@ -99,6 +112,11 @@ def train(model, data, args, seed, device):
     if scale_params:
         groups.append({"params": scale_params, "weight_decay": 0.0})
     optimizer = torch.optim.AdamW(groups, lr=args.lr)
+    warmup = min(args.warmup_steps, args.steps)
+    decay = max(1, args.steps - warmup)
+    schedule = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lambda i: (i + 1) / warmup if i < warmup else 0.5 * (1 + math.cos(math.pi * (i - warmup) / decay)))
+    trajectory = []
     batches = torch.Generator().manual_seed(seed + 1000)  # identical batch order across modes
     best = (float("inf"), None, -1)
     start = time.perf_counter()
@@ -112,15 +130,25 @@ def train(model, data, args, seed, device):
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        schedule.step()
         if step % args.eval_every == 0 or step == args.steps:
+            if scale_params:
+                trajectory.append({"step": step, "log_scales": [p.detach().cpu().tolist() for p in scale_params]})
             val_mse, _ = evaluate(model, val_x, val_y)
             if val_mse < best[0]:
                 best = (val_mse, {k: v.detach().clone() for k, v in model.state_dict().items()}, step)
     seconds = time.perf_counter() - start
     model.load_state_dict(best[1])
-    test_mse, test_mae = evaluate(model, test_x, test_y)
+    horizon = val_y.shape[1]
+    test_mse, test_mae = evaluate(model, test_x, test_y[:, :horizon])
     result = {"val_mse": best[0], "best_step": best[2], "test_mse": test_mse, "test_mae": test_mae,
               "seconds": round(seconds, 2)}
+    if isinstance(model, GroupedRoPEForecaster) and model.cfg.forecast_head == "horizon_tokens":
+        per_step, _ = step_errors(model, test_x, test_y, horizon=test_y.shape[1])
+        result["test_per_step_mse"] = per_step.cpu().tolist()
+        result["extrapolation_mse"] = {str(h): per_step[:h].mean().item() for h in args.eval_horizons}
+    if trajectory:
+        result["scale_trajectory"] = trajectory
     if isinstance(model, GroupedRoPEForecaster):
         result["periods"] = [info["periods"].cpu().tolist() for info in model.rope_diagnostics()]
         result["scales"] = [info["scales"].cpu().tolist() for info in model.rope_diagnostics()]
@@ -142,14 +170,19 @@ def main():
     parser.add_argument("--n-train", type=int, default=2048)
     parser.add_argument("--n-val", type=int, default=256)
     parser.add_argument("--n-test", type=int, default=512)
-    parser.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
-    parser.add_argument("--bases", type=float, nargs="+", default=[100.0, 1000.0, 10000.0])
+    parser.add_argument("--modes", nargs="+", choices=ROPE_MODES, default=list(MODES),
+                        help="'none' (NoPE) is a diagnostic, not part of the main comparison")
+    parser.add_argument("--head", choices=["horizon_tokens", "pooled"], default="horizon_tokens")
+    parser.add_argument("--eval-horizons", type=int, nargs="*", default=[],
+                        help="Extra test horizons (horizon_tokens only); may exceed --horizon")
+    parser.add_argument("--bases", type=float, nargs="+", default=[1000.0, 10000.0])
     parser.add_argument("--groups", type=int, default=2)
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--data-seed", type=int, default=12345)
     parser.add_argument("--steps", type=int, default=3000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--warmup-steps", type=int, default=200, help="Linear warmup, then cosine decay to 0")
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--eval-every", type=int, default=100)
     parser.add_argument("--no-linear", action="store_true", help="Skip the linear reference model")
@@ -157,14 +190,18 @@ def main():
     parser.add_argument("--out", type=Path, default=Path("results/synthetic_multiscale.json"))
     args = parser.parse_args()
     device = torch.device(args.device)
-
-    generator = torch.Generator().manual_seed(args.data_seed)
+    if args.eval_horizons and args.head != "horizon_tokens":
+        parser.error("--eval-horizons requires --head horizon_tokens")
+    splits = ((args.n_train, args.horizon), (args.n_val, args.horizon),
+              (args.n_test, max([args.horizon, *args.eval_horizons])))
+    # One generator per split, so extra test horizons do not change train/validation data.
     data = tuple(
-        tuple(t.to(device) for t in make_data(args.task, n, args.lookback, args.horizon, args.periods, args.noise, generator))
-        for n in (args.n_train, args.n_val, args.n_test)
+        tuple(t.to(device) for t in make_data(args.task, n, args.lookback, h, args.periods, args.noise,
+                                              torch.Generator().manual_seed(args.data_seed + offset)))
+        for offset, (n, h) in enumerate(splits)
     )
     model_cfg = dict(input_dim=1, horizon=args.horizon, d_model=64, n_heads=4, num_layers=2,
-                     d_ff=128, dropout=0.0, n_freq_groups=args.groups)
+                     d_ff=128, dropout=0.0, n_freq_groups=args.groups, forecast_head=args.head)
 
     runs = []
     for seed in args.seeds:
@@ -184,7 +221,7 @@ def main():
 
     summary = []
     names = (["linear"] if not args.no_linear else []) + list(args.modes)
-    print("\nPer mode: base chosen by mean validation MSE; test reported only for that base")
+    print(f"\ntask={args.task}, head={args.head}. Per mode: base chosen by mean validation MSE; test reported only for that base")
     print(f"{'model':12} {'base':>7} {'val MSE':>18} {'test MSE':>18} {'test MAE':>18}")
     for name in names:
         candidates = []
@@ -195,9 +232,13 @@ def main():
         entry = {"model": name, "chosen_base": base}
         for key in ("val_mse", "test_mse", "test_mae"):
             entry[key] = mean_std([r[key] for r in rows])
+        if all("extrapolation_mse" in r for r in rows):
+            entry["extrapolation_mse"] = {h: mean_std([r["extrapolation_mse"][h] for r in rows])
+                                          for h in rows[0]["extrapolation_mse"]}
         summary.append(entry)
         cells = " ".join(f"{m:.5f}±{s:.5f}".rjust(18) for m, s in (entry["val_mse"], entry["test_mse"], entry["test_mae"]))
-        print(f"{name:12} {str(base if base is None else f'{base:g}'):>7} {cells}")
+        extra = "".join(f"  H={h}: {m:.5f}±{s:.5f}" for h, (m, s) in entry.get("extrapolation_mse", {}).items())
+        print(f"{name:12} {str(base if base is None else f'{base:g}'):>7} {cells}{extra}")
     print("Synthetic mechanism check only; not evidence about real forecasting benchmarks.")
 
     environment = {"python": platform.python_version(), "torch": torch.__version__, "device": str(device),

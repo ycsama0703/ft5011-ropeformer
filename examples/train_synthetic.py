@@ -6,6 +6,7 @@ import sys
 import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from grouped_rope import GroupedRoPEForecaster
+from grouped_rope.model import ROPE_MODES
 
 
 def make_data(count, lookback, horizon, seed):
@@ -21,7 +22,8 @@ def make_data(count, lookback, horizon, seed):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["standard", "fixed_head", "head", "shared_group", "grouped"], default="grouped")
+    parser.add_argument("--mode", choices=ROPE_MODES, default="grouped")
+    parser.add_argument("--head", choices=["horizon_tokens", "pooled"], default="horizon_tokens")
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--checkpoint", type=Path)
@@ -33,7 +35,7 @@ def main():
     train_x, train_y = make_data(256, 64, 12, args.seed + 1)
     val_x, val_y = make_data(64, 64, 12, args.seed + 2)
     test_x, test_y = make_data(64, 64, 12, args.seed + 3)
-    model = GroupedRoPEForecaster(input_dim=1, horizon=12, d_model=32, n_heads=4, num_layers=2, d_ff=64, dropout=0.0, rope_mode=args.mode)
+    model = GroupedRoPEForecaster(input_dim=1, horizon=12, d_model=32, n_heads=4, num_layers=2, d_ff=64, dropout=0.0, rope_mode=args.mode, forecast_head=args.head)
     scale_params = [p for n, p in model.named_parameters() if n.endswith("log_scales")]
     other_params = [p for n, p in model.named_parameters() if not n.endswith("log_scales")]
     optimizer = torch.optim.AdamW([
@@ -62,7 +64,7 @@ def main():
     model.load_state_dict(best_state)
     with torch.no_grad():
         error = model(test_x) - test_y
-    print(f"mode={args.mode}, steps={args.steps}")
+    print(f"mode={args.mode}, head={args.head}, steps={args.steps}")
     print(f"validation MSE: initial={initial:.6f}, best={best_loss:.6f}")
     print(f"held-out synthetic test: MSE={error.square().mean():.6f}, MAE={error.abs().mean():.6f}")
     print("First-layer scales:", model.rope_diagnostics()[0]["scales"].tolist())
