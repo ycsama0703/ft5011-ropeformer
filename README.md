@@ -2,7 +2,7 @@
 
 **面向时间序列预测的分组可学习旋转位置编码。** 这是 Deep Learning 课程小组项目，目标是做清楚一个模型改动及其对照实验，不要求绝对创新，也不预设一定提升预测性能。
 
-> 给组员和 AI 助手：先读本 README，再读 [AGENTS.md](AGENTS.md)、[实验方案](docs/experiments.md)，最后看 [核心实现](src/grouped_rope/model.py)。当前已有模型、数学性质测试和合成训练示例；真实数据实验尚未实现。不要把示例输出写成方法有效的证据。
+> 给组员和 AI 助手：先读本 README，再读 [AGENTS.md](AGENTS.md)、[实验方案](docs/experiments.md)，最后看 [核心实现](src/grouped_rope/model.py)。当前已有模型、数学性质测试、合成机制检查，以及真实数据 loader 与共享基准训练入口（ETTh1、Electricity）。不要把示例输出写成方法有效的证据。
 
 ## 1. 我们研究什么
 
@@ -169,7 +169,7 @@ with torch.no_grad():
 - 指数参数化保证正值，不保证优化永远稳定；过大频率还可能产生离散采样混叠。
 - 不默认添加尺度分离损失。尺度相似可能是合理解，不能为了好看的图强迫 head 分工。
 - 未引入 FFT 条件网络、动态尺度、可学习分组边界或滤波器。不要把讨论过的扩展说成已实现。
-- 单元测试在 CPU 上运行；合成实验脚本在本机 CUDA GPU 上跑过，但没有 GPU 单元测试或 CI 结果，也没有真实数据预测结果。
+- 单元测试在 CPU 上运行；合成实验与基准脚本在本机 CUDA GPU 上跑过，但没有 GPU 单元测试或 CI 结果。
 
 合成示例生成独立的训练/验证/测试序列，用验证集选择最佳状态，最后只评估测试集。不用于方法优劣结论：周期固定且任务较简单。
 
@@ -185,6 +185,17 @@ python tools/check_rope_spectrum.py --checkpoint results/demo.pt
 python examples/synthetic_multiscale.py --task regime_switch --eval-horizons 48 96 144
 ```
 
+真实数据（通道独立：每个变量单独作为单变量序列预测，input_dim=1）。数据由单独脚本从
+Hugging Face `thuml/Time-Series-Library`（CC BY 4.0）下载到 `data/`（不进 Git），包内不下载数据。
+切分沿用文献惯例：ETT 按 12/4/4 个月，其他按时间 7:1:2；标准化只用训练段统计量；指标在标准化尺度上，
+覆盖全部测试窗口和通道。每个模式按验证集在 base 网格中选择，测试只报告选中的 base。
+
+```bash
+python tools/download_data.py ETTh1 electricity
+python tools/run_benchmark.py --dataset ETTh1 --steps 3000 --eval-every 250 --seeds 0 --eval-horizons 192 336     --out results/benchmark/ETTh1_L336_H96_s0.json
+python tools/summarize_benchmark.py results/benchmark/ETTh1_L336_H96_s*.json
+```
+
 ## 9. 仓库结构与下一步
 
 ```text
@@ -196,10 +207,15 @@ GroupedRoPE/
   src/grouped_rope/
     __init__.py
     model.py                通用预测器、两种预测头与位置编码配置
+    data.py                 基准 CSV 读取、标准切分、训练段标准化、通道独立窗口
   tests/test_model.py       数学性质、梯度和模型接口测试
+  tests/test_data.py        切分边界、标准化只用训练段、窗口对齐
   tools/
     smoke_test.py
     check_rope_spectrum.py
+    download_data.py        显式下载基准 CSV 到 data/
+    run_benchmark.py        共享基准训练入口（所有模式同骨架同预算，含线性参照）
+    summarize_benchmark.py  合并多文件结果、统一选 base、配对比较
   examples/
     train_synthetic.py      最小合成训练示例
     synthetic_multiscale.py 多尺度合成机制检查与预测长度外推
@@ -210,7 +226,7 @@ GroupedRoPE/
   .github/workflows/tests.yml
 ```
 
-下一阶段是实现真实数据 loader、训练集标准化、共享训练入口和基线。建议先选择两个公开预测数据集，完成 standard/head/shared_group/grouped 的同预算对照，再考虑更多频率组。完整实验设计见 [docs/experiments.md](docs/experiments.md)。
+下一阶段：在 ETTh1 与 Electricity 上完成 standard/head/shared_group/grouped 的同预算对照（已有线性参照，LSTM 基线尚未实现），再考虑更多频率组和预测长度。完整实验设计见 [docs/experiments.md](docs/experiments.md)。
 
 ## 10. 项目来源
 

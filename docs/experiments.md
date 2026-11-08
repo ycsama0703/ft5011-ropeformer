@@ -47,9 +47,19 @@ regime_switch。在旧的 pooled 骨架上已观察到（仅机制检查，非�
 解到噪声水平；quasi_periodic 上线性与 Transformer 持平；各模式差距小于种子波动；
 所有 log-scale 仅移动到 0.7–1.2 倍。这是改用 horizon_tokens 头的直接原因。
 
-### 真实预测实验（待实现）
+### 真实预测实验
 
-建议从 ETTh1 和 Weather 等两个适中规模公开数据集开始。数据集与目标由
+已选定 ETTh1（流程检查，周期结构弱、噪声大）与 Electricity（主实验，日 24 步与周 168 步周期都强）。
+来源：Hugging Face `thuml/Time-Series-Library`（CC BY 4.0），`tools/download_data.py` 打印 SHA-256。
+ETTh1：17,420 行 × 7 变量；Electricity：26,304 行 × 321 变量。无缺失值（加载时检查）。
+
+设置：通道独立（每个变量单独作为单变量样本，input_dim=1，所有模式相同）；回看 L=336；
+训练预测长度 H=96，并对训练好的 horizon_tokens 模型评估 H=192/336 的外推。
+切分：ETT 12/4/4 个月（训练 0–8640，验证 8640–11520，测试 11520–14400），Electricity 时间 7:1:2。
+验证集用于选 base 和最佳状态；Electricity 验证窗口较多，使用固定随机子集（数量记录在结果中）；
+测试覆盖全部窗口与通道，不 drop_last。线性参照为通道独立的 Linear(L, H)。
+
+以下为原始建议，保留供参考：数据集与目标由
 小组最终确认，不绑定旧金融任务。明确下载来源、版本、时间范围、变量数、
 缺失处理、切分位置与可用窗口数量。
 

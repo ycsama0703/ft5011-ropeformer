@@ -64,8 +64,10 @@ which platforms were tested; do not imply CUDA/CI verification from CPU tests.
   docs/plan_horizon_tokens.md); pooled is kept only as a head ablation and
   rope_mode="none" only as a NoPE diagnostic. Keep the horizon-independence
   and history-independence invariants tested.
-- Real benchmark loaders, shared benchmark training runner, linear/LSTM baselines
-  and benchmark results are not yet implemented.
+- Benchmark data (grouped_rope.data, tools/download_data.py), the shared runner
+  tools/run_benchmark.py (channel-independent, linear reference) and
+  tools/summarize_benchmark.py exist for ETTh1/Electricity. The LSTM baseline is
+  not implemented. Benchmark results live in results/ and are not committed.
 - Keep checkpoints/data/results out of Git. Never commit tokens or .env files.
 - Do not publish to GitHub, push, or choose a project license without user direction.
 - Avoid changing the earlier D:/NUS/RopeFormer repository as part of this project.
