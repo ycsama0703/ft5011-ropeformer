@@ -31,12 +31,15 @@ class ForecastConfig:
     forecast_head: ForecastHead = "horizon_tokens"
     pooling: Literal["last", "mean"] | None = None  # pooled head only; None means "mean"
     causal: bool = False
+    patch_len: int | None = None  # None: one token per time step; P: non-overlapping P-step patches
 
     def __post_init__(self):
         for name in ("input_dim", "horizon", "d_model", "n_heads", "num_layers", "d_ff", "n_freq_groups"):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.patch_len is not None and (type(self.patch_len) is not int or self.patch_len <= 0):
+            raise ValueError("patch_len must be a positive integer or None")
         if self.output_dim is not None and (type(self.output_dim) is not int or self.output_dim <= 0):
             raise ValueError("output_dim must be a positive integer or None")
         if self.d_model % self.n_heads or (self.d_model // self.n_heads) % 2:
@@ -205,6 +208,8 @@ class GroupedRoPEForecaster(nn.Module):
 
     forecast_head="horizon_tokens" (default) appends one shared learnable
     placeholder token per future step at positions history..history+horizon-1;
+    with patch_len=P, tokens are non-overlapping P-step patches (positions count
+    patches) and each placeholder predicts the P steps of one future patch;
     RoPE is then the only thing distinguishing future steps, and each step is
     read out by a shared per-token linear layer. forecast_head="pooled" keeps
     the earlier mean/last pooling + flat linear head as an ablation.
@@ -220,12 +225,13 @@ class GroupedRoPEForecaster(nn.Module):
         self.cfg = cfg if cfg is not None else ForecastConfig(**kwargs)
         cfg = self.cfg
         self.output_dim = cfg.input_dim if cfg.output_dim is None else cfg.output_dim
-        self.input_projection = nn.Linear(cfg.input_dim, cfg.d_model)
+        self.patch = cfg.patch_len or 1
+        self.input_projection = nn.Linear(cfg.input_dim * self.patch, cfg.d_model)
         if cfg.forecast_head == "horizon_tokens":
             self.horizon_token = nn.Parameter(torch.randn(cfg.d_model) * 0.02)
         self.blocks = nn.ModuleList([EncoderBlock(cfg) for _ in range(cfg.num_layers)])
         self.output_norm = nn.LayerNorm(cfg.d_model)
-        width = self.output_dim if cfg.forecast_head == "horizon_tokens" else cfg.horizon * self.output_dim
+        width = self.output_dim * self.patch if cfg.forecast_head == "horizon_tokens" else cfg.horizon * self.output_dim
         self.forecast_head = nn.Linear(cfg.d_model, width)
 
     def forward(self, x: Tensor, *, horizon: int | None = None, return_attention: bool = False):
@@ -240,12 +246,18 @@ class GroupedRoPEForecaster(nn.Module):
         if horizon is not None and (type(horizon) is not int or horizon <= 0):
             raise ValueError("horizon must be a positive integer")
         horizon = self.cfg.horizon if horizon is None else horizon
-        batch, history = x.shape[:2]
+        batch, steps = x.shape[:2]
+        if steps < self.patch:
+            raise ValueError(f"History must contain at least patch_len={self.patch} steps")
+        # Patches end at the forecast origin; the oldest steps % patch_len rows are dropped.
+        history = steps // self.patch
+        x = x[:, steps - history * self.patch:].reshape(batch, history, self.patch * x.shape[-1])
         h = self.input_projection(x)
         if tokens:
-            placeholders = self.horizon_token.to(h.dtype).expand(batch, horizon, -1)
+            future = -(-horizon // self.patch)  # placeholder tokens, one per future patch
+            placeholders = self.horizon_token.to(h.dtype).expand(batch, future, -1)
             h = torch.cat((h, placeholders), dim=1)
-            mask = horizon_token_mask(history, horizon, self.cfg.causal, x.device)
+            mask = horizon_token_mask(history, future, self.cfg.causal, x.device)
         else:
             mask = torch.ones(history, history, dtype=torch.bool, device=x.device).tril() if self.cfg.causal else None
         maps = []
@@ -255,7 +267,7 @@ class GroupedRoPEForecaster(nn.Module):
                 maps.append(attention)
         h = self.output_norm(h)
         if tokens:
-            forecast = self.forecast_head(h[:, history:])
+            forecast = self.forecast_head(h[:, history:]).reshape(batch, -1, self.output_dim)[:, :horizon]
         else:
             pooled = h[:, -1] if self.cfg.pooling == "last" else h.mean(dim=1)
             forecast = self.forecast_head(pooled).reshape(batch, horizon, self.output_dim)

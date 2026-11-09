@@ -16,8 +16,11 @@ FILES = {
     "ETTh1": "ETT-small/ETTh1.csv",
     "ETTh2": "ETT-small/ETTh2.csv",
     "ETTm1": "ETT-small/ETTm1.csv",
+    "ETTm2": "ETT-small/ETTm2.csv",
     "weather": "weather/weather.csv",
     "electricity": "electricity/electricity.csv",
+    "traffic": "traffic/traffic.csv",
+    "exchange_rate": "exchange_rate/exchange_rate.csv",
 }
 
 
@@ -43,7 +46,10 @@ def main():
         else:
             partial = target.with_suffix(".csv.part")
             with urllib.request.urlopen(SOURCE + FILES[name]) as response, open(partial, "wb") as f:
+                expected = response.headers.get("Content-Length")
                 shutil.copyfileobj(response, f)
+            if expected is not None and partial.stat().st_size != int(expected):
+                raise SystemExit(f"{name}: truncated download ({partial.stat().st_size} of {expected} bytes); retry")
             partial.replace(target)
             print(f"{name}: downloaded {target.stat().st_size} bytes from {SOURCE + FILES[name]}")
         print(f"  sha256 {sha256(target)}")

@@ -9,7 +9,7 @@ on the normalized scale, averaged over every test window and channel
 
 Protocol per seed: torch.manual_seed(seed) before building each model (paired
 initialization), identical batch order from a generator seeded with seed+1000,
-AdamW with log_scales in a no-weight-decay group, linear warmup + cosine decay,
+AdamW with log_scales in a no-weight-decay group (own lr via --scale-lr), warmup + cosine decay,
 best state chosen on validation MSE. Each mode picks rope_base by mean
 validation MSE over seeds; test is reported only for that choice. Validation
 uses a fixed random subset of windows when --val-samples is smaller than the
@@ -17,6 +17,15 @@ validation set (recorded in the output).
 
 With --eval-horizons, the horizon_tokens model trained at --horizon is also
 scored on longer horizons (test windows that fit the longest horizon).
+
+Shared options applied identically to every model, including the linear
+reference, and recorded in the output:
+--instance-norm  per-window z-score of each history (no learnable affine); the
+                 forecast is mapped back with the same statistics, so metrics
+                 stay on the dataset's training-fitted scale.
+--amp bf16       bfloat16 autocast for model forward passes. RoPE angles and
+                 sin/cos are still computed in float32 inside the model; the
+                 loss and metrics are computed in float32/float64.
 """
 import argparse
 import json
@@ -48,23 +57,35 @@ class LinearForecaster(nn.Module):
         return self.proj(x.transpose(1, 2)).transpose(1, 2)
 
 
+def predict(model, x, args, **kwargs):
+    """Forward pass with the shared instance-norm and autocast options."""
+    if args.instance_norm:
+        mean = x.mean(1, keepdim=True)
+        std = (x.var(1, keepdim=True, unbiased=False) + 1e-5).sqrt()
+        x = (x - mean) / std
+    with torch.autocast(device_type=x.device.type, dtype=torch.bfloat16, enabled=args.amp == "bf16"):
+        out = model(x, **kwargs)
+    out = out.float()
+    return out * std + mean if args.instance_norm else out
+
+
 @torch.no_grad()
-def step_errors(model, data, samples, horizon, chunk, call_horizon=None):
+def step_errors(model, data, samples, horizon, args, call_horizon=None):
     """Per-step MSE and MAE over all given samples."""
     model.eval()
     kwargs = {} if call_horizon is None else {"horizon": call_horizon}
     sq = torch.zeros(horizon, dtype=torch.float64, device=data.series.device)
     ab = torch.zeros_like(sq)
-    for i in range(0, samples.shape[0], chunk):
-        x, y = data.batch(samples[i:i + chunk], horizon)
-        error = (model(x, **kwargs) - y).double()
-        sq += error.square().sum(dim=(0, 2))
-        ab += error.abs().sum(dim=(0, 2))
+    for i in range(0, samples.shape[0], args.eval_chunk):
+        x, y = data.batch(samples[i:i + args.eval_chunk], horizon)
+        error = (predict(model, x, args, **kwargs) - y).double()
+        sq += error.square().mean(dim=2).sum(0)  # channel mean: identical for [B, H, 1] samples
+        ab += error.abs().mean(dim=2).sum(0)
     return sq / samples.shape[0], ab / samples.shape[0]
 
 
-def evaluate(model, data, samples, horizon, chunk):
-    sq, ab = step_errors(model, data, samples, horizon, chunk)
+def evaluate(model, data, samples, horizon, args):
+    sq, ab = step_errors(model, data, samples, horizon, args)
     return sq.mean().item(), ab.mean().item()
 
 
@@ -74,7 +95,7 @@ def train(model, data, splits, args, seed):
     other_params = [p for n, p in model.named_parameters() if not n.endswith("log_scales")]
     groups = [{"params": other_params, "weight_decay": args.weight_decay}]
     if scale_params:
-        groups.append({"params": scale_params, "weight_decay": 0.0})
+        groups.append({"params": scale_params, "weight_decay": 0.0, "lr": args.scale_lr or args.lr})
     optimizer = torch.optim.AdamW(groups, lr=args.lr)
     warmup = min(args.warmup_steps, args.steps)
     decay = max(1, args.steps - warmup)
@@ -88,7 +109,7 @@ def train(model, data, splits, args, seed):
         model.train()
         idx = torch.randint(train_samples.shape[0], (args.batch_size,), generator=batches)
         x, y = data.batch(train_samples[idx], args.horizon)
-        loss = (model(x) - y).square().mean()
+        loss = (predict(model, x, args) - y).square().mean()
         if not torch.isfinite(loss):
             raise RuntimeError("Non-finite training loss")
         optimizer.zero_grad(set_to_none=True)
@@ -99,23 +120,25 @@ def train(model, data, splits, args, seed):
         if step % args.eval_every == 0 or step == args.steps:
             if scale_params:
                 trajectory.append({"step": step, "log_scales": [p.detach().cpu().tolist() for p in scale_params]})
-            val_mse, _ = evaluate(model, data, val_samples, args.horizon, args.eval_chunk)
+            val_mse, _ = evaluate(model, data, val_samples, args.horizon, args)
             curve.append({"step": step, "train_loss": loss.item(), "val_mse": val_mse})
             if val_mse < best[0]:
                 best = (val_mse, {k: v.detach().clone() for k, v in model.state_dict().items()}, step)
     seconds = time.perf_counter() - start
     model.load_state_dict(best[1])
-    test_mse, test_mae = evaluate(model, data, test_samples, args.horizon, args.eval_chunk)
+    test_mse, test_mae = evaluate(model, data, test_samples, args.horizon, args)
     result = {"val_mse": best[0], "best_step": best[2], "test_mse": test_mse, "test_mae": test_mae,
               "train_seconds": round(seconds, 2), "curve": curve,
               "parameters": sum(p.numel() for p in model.parameters())}
     if extra_samples is not None and isinstance(model, GroupedRoPEForecaster):
         longest = max(args.eval_horizons)
-        per_step, _ = step_errors(model, data, extra_samples, longest, args.eval_chunk, call_horizon=longest)
+        per_step, _ = step_errors(model, data, extra_samples, longest, args, call_horizon=longest)
         result["extrapolation_per_step_mse"] = per_step.cpu().tolist()
         result["extrapolation_mse"] = {str(h): per_step[:h].mean().item() for h in [args.horizon, *args.eval_horizons]}
     if trajectory:
         result["scale_trajectory"] = trajectory
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()  # keep the cached GPU memory of parallel processes bounded
     if isinstance(model, GroupedRoPEForecaster):
         result["scales"] = [info["scales"].cpu().tolist() for info in model.rope_diagnostics()]
     return result
@@ -138,6 +161,8 @@ def main():
     parser.add_argument("--head", choices=["horizon_tokens", "pooled"], default="horizon_tokens")
     parser.add_argument("--bases", type=float, nargs="+", default=[1000.0, 10000.0])
     parser.add_argument("--groups", type=int, default=2)
+    parser.add_argument("--patch-len", type=int, default=None,
+                        help="Non-overlapping patch tokens of this many steps for every RoPE mode (default: point tokens)")
     parser.add_argument("--d-model", type=int, default=64)
     parser.add_argument("--n-heads", type=int, default=4)
     parser.add_argument("--layers", type=int, default=2)
@@ -147,6 +172,8 @@ def main():
     parser.add_argument("--steps", type=int, default=8000)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--scale-lr", type=float, default=None,
+                        help="Learning rate of the RoPE log-scales (every learnable mode; default: --lr)")
     parser.add_argument("--warmup-steps", type=int, default=300)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--eval-every", type=int, default=500)
@@ -154,6 +181,9 @@ def main():
                         help="Fixed random subset of validation windows used for model selection")
     parser.add_argument("--eval-chunk", type=int, default=1024,
                         help="Windows per evaluation forward; larger chunks need much more GPU memory")
+    parser.add_argument("--instance-norm", action="store_true",
+                        help="Per-window z-score of histories for every model (no learnable parameters)")
+    parser.add_argument("--amp", choices=["none", "bf16"], default="none")
     parser.add_argument("--no-linear", action="store_true")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--out", type=Path, default=None)
@@ -184,7 +214,7 @@ def main():
     splits = (train_samples, val_samples, test_samples, extra_samples)
     model_cfg = dict(input_dim=1, horizon=args.horizon, d_model=args.d_model, n_heads=args.n_heads,
                      num_layers=args.layers, d_ff=args.d_ff, dropout=args.dropout, n_freq_groups=args.groups,
-                     forecast_head=args.head)
+                     forecast_head=args.head, patch_len=args.patch_len)
 
     runs = []
     for seed in args.seeds:
@@ -206,7 +236,8 @@ def main():
 
     summary = []
     names = (["linear"] if not args.no_linear else []) + list(args.modes)
-    print(f"\n{args.dataset} L={args.lookback} H={args.horizon} head={args.head}. "
+    print(f"\n{args.dataset} L={args.lookback} H={args.horizon} head={args.head} patch_len={args.patch_len} "
+          f"instance_norm={args.instance_norm} amp={args.amp}. "
           "Base chosen per mode by mean validation MSE; test reported only for that base")
     print(f"{'model':12} {'base':>7} {'val MSE':>16} {'test MSE':>16} {'test MAE':>16}")
     for name in names:

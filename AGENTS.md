@@ -66,8 +66,10 @@ which platforms were tested; do not imply CUDA/CI verification from CPU tests.
   and history-independence invariants tested.
 - Benchmark data (grouped_rope.data, tools/download_data.py), the shared runner
   tools/run_benchmark.py (channel-independent, linear reference) and
-  tools/summarize_benchmark.py exist for ETTh1/Electricity. The LSTM baseline is
-  not implemented. Benchmark results live in results/ and are not committed.
+  tools/summarize_benchmark.py exist for ETTh1/Electricity. External baselines (tools/baselines.py, tools/run_baselines.py) are compact
+  re-implementations; tools/benchmark_suite.py runs the 8-dataset suite and
+  tools/vast_job.py runs it on rented vast.ai GPUs (costs money; destroy after fetch).
+  patch_len is a backbone option shared by all RoPE modes. Benchmark results live in results/ and are not committed.
 - Keep checkpoints/data/results out of Git. Never commit tokens or .env files.
 - Do not publish to GitHub, push, or choose a project license without user direction.
 - Avoid changing the earlier D:/NUS/RopeFormer repository as part of this project.

@@ -209,6 +209,67 @@ class HorizonTokenTests(unittest.TestCase):
                 torch.testing.assert_close(value, shapes["standard"][name], msg=f"{mode}: {name}")
 
 
+class PatchTokenTests(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(13)
+
+    def model(self, patch_len=4, **kwargs):
+        model = GroupedRoPEForecaster(cfg(input_dim=2, horizon=6, patch_len=patch_len, **kwargs)).eval()
+        for name, param in model.named_parameters():
+            if name.endswith("log_scales"):
+                with torch.no_grad():
+                    param.copy_(torch.randn_like(param) * 0.3)
+        return model
+
+    def test_patch_len_one_matches_point_tokens(self):
+        torch.manual_seed(0)
+        point = GroupedRoPEForecaster(cfg(input_dim=2, horizon=6)).eval()
+        torch.manual_seed(0)
+        patched = GroupedRoPEForecaster(cfg(input_dim=2, horizon=6, patch_len=1)).eval()
+        x = torch.randn(3, 12, 2)
+        torch.testing.assert_close(point(x), patched(x))
+
+    def test_shapes_and_partial_last_patch(self):
+        model = self.model()
+        for horizon in (1, 4, 6, 9):
+            self.assertEqual(tuple(model(torch.randn(2, 16, 2), horizon=horizon).shape), (2, horizon, 2))
+
+    def test_prefix_independent_of_horizon(self):
+        model = self.model()
+        x = torch.randn(3, 16, 2)
+        torch.testing.assert_close(model(x, horizon=5), model(x, horizon=13)[:, :5])
+
+    def test_oldest_remainder_rows_are_dropped(self):
+        model = self.model()
+        x = torch.randn(2, 16, 2)
+        padded = torch.cat([torch.randn(2, 3, 2), x], 1)  # 19 steps -> the same 4 patches
+        torch.testing.assert_close(model(x), model(padded))
+
+    def test_patch_reshape_is_time_major(self):
+        model = self.model(patch_len=2, rope_mode="standard")
+        x = torch.randn(1, 4, 2)
+        expected = model.input_projection(torch.stack([x[0, :2].reshape(-1), x[0, 2:].reshape(-1)]))
+        with torch.no_grad():
+            got = model.input_projection(x.reshape(1, 2, 4))[0]
+        torch.testing.assert_close(got, expected)
+
+    def test_history_shorter_than_patch_rejected(self):
+        with self.assertRaises(ValueError):
+            self.model()(torch.randn(1, 3, 2))
+        with self.assertRaises(ValueError):
+            ForecastConfig(patch_len=0)
+
+    def test_modes_differ_only_in_log_scales(self):
+        params = {}
+        for mode in ("standard", "head", "shared_group", "grouped"):
+            torch.manual_seed(0)
+            model = GroupedRoPEForecaster(cfg(patch_len=4, rope_mode=mode))
+            params[mode] = {n: p.detach() for n, p in model.named_parameters() if not n.endswith("log_scales")}
+        for mode, values in params.items():
+            for name, value in values.items():
+                torch.testing.assert_close(value, params["standard"][name], msg=f"{mode}: {name}")
+
+
 if __name__ == "__main__":
     torch.set_num_threads(1)
     unittest.main()

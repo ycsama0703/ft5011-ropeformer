@@ -34,7 +34,9 @@ def main():
     args = parser.parse_args()
     payloads = [json.loads(f.read_text()) for f in args.files]
     keys = {(p["args"]["dataset"], p["args"]["lookback"], p["args"]["horizon"], p["args"]["head"],
-             p["args"]["steps"], p["args"]["batch_size"], p["args"]["lr"]) for p in payloads}
+             p["args"]["steps"], p["args"]["batch_size"], p["args"]["lr"],
+             p["args"].get("instance_norm", False), p["args"].get("amp", "none"),
+             p["args"].get("patch_len"), p["args"].get("scale_lr")) for p in payloads}
     if len(keys) != 1:
         raise SystemExit(f"Files use different settings: {keys}")
     runs = [r for p in payloads for r in p["runs"]]

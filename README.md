@@ -147,7 +147,7 @@ loss.backward()
 
 接口为 `[batch, history, input_dim] -> [batch, horizon, output_dim]`。output_dim 默认等于 input_dim；可显式配置其他输出维度，调用者负责正确构造标签。
 
-默认 forecast_head="horizon_tokens"；`model(x, horizon=96)` 可在推理时改变预测长度。pooled 头需显式设置 `forecast_head="pooled"`，可选 `pooling="mean"`（默认）或 `"last"`；在 horizon_tokens 下设置 pooling 会报错。历史部分默认不使用因果 mask，因为输入全部是预测起点之前已知的历史；可设置 causal=True 做因果对照，所有实验应保持该设置一致。无独立 decoder、外生 cross-attention、方向或分布预测头。
+默认 forecast_head="horizon_tokens"；`model(x, horizon=96)` 可在推理时改变预测长度。pooled 头需显式设置 `forecast_head="pooled"`，可选 `pooling="mean"`（默认）或 `"last"`；在 horizon_tokens 下设置 pooling 会报错。`patch_len=P` 把历史切成不重叠的 P 步 patch 作为 token（最旧的 L mod P 行丢弃，位置以 patch 计），每个占位 token 预测一个未来 patch 的 P 步，超出 H 的部分截掉；默认 None 即逐点 token，patch_len=1 与之等价。这是对所有 RoPE 模式同时生效的骨架选项。历史部分默认不使用因果 mask，因为输入全部是预测起点之前已知的历史；可设置 causal=True 做因果对照，所有实验应保持该设置一致。无独立 decoder、外生 cross-attention、方向或分布预测头。
 
 输入/目标的归一化与反归一化由外部数据流程负责，模型内部不偷偷改变目标定义。
 
@@ -196,6 +196,20 @@ python tools/run_benchmark.py --dataset ETTh1 --steps 3000 --eval-every 250 --se
 python tools/summarize_benchmark.py results/benchmark/ETTh1_L336_H96_s*.json
 ```
 
+多数据集套件（每个数据集固定步数预算，见 `tools/benchmark_suite.py`）与外部基线：
+
+```bash
+python tools/benchmark_suite.py --datasets ETTh1 ETTh2 --horizons 96 192 336 --amp bf16 [--patch-len 16] [--instance-norm] \n    [--bases 10 100 1000] [--seeds 0 1 2] [--scale-lr 1e-2] [--tag _suffix]
+python tools/run_baselines.py --dataset ETTh1 --horizon 96   # Naive/SNaive/Mean, Ridge, LightGBM, DLinear, LSTM, PatchTST, iTransformer
+python tools/vast_job.py offers                               # 可选：在 vast.ai 租卡跑套件（需本地 vastai CLI 与 API key，按小时计费）
+```
+
+`--scale-lr` 给所有可学习模式（head/shared_group/grouped）的 log-scale 一个相同的单独学习率（默认等于 `--lr`），
+`--tag` 只改输出文件名后缀。
+
+外部基线是按论文结构写的精简复现（`tools/baselines.py`），使用相同的数据、切分、指标和训练循环，
+学习率在 {1e-3, 1e-4} 中按验证集选择；它们是参照点，不是作者原始代码的复现结果。
+
 ## 9. 仓库结构与下一步
 
 ```text
@@ -215,6 +229,10 @@ GroupedRoPE/
     check_rope_spectrum.py
     download_data.py        显式下载基准 CSV 到 data/
     run_benchmark.py        共享基准训练入口（所有模式同骨架同预算，含线性参照）
+    benchmark_suite.py      多数据集/多预测长度套件，按数据集固定预算，可断点续跑
+    baselines.py            外部基线模型（统计、DLinear、LSTM、PatchTST、iTransformer）
+    run_baselines.py        外部基线运行入口（同数据、同指标、同训练循环）
+    vast_job.py             在 vast.ai 实例上上传代码、运行套件、取回结果、销毁实例
     summarize_benchmark.py  合并多文件结果、统一选 base、配对比较
   examples/
     train_synthetic.py      最小合成训练示例
@@ -226,7 +244,7 @@ GroupedRoPE/
   .github/workflows/tests.yml
 ```
 
-下一阶段：在 ETTh1 与 Electricity 上完成 standard/head/shared_group/grouped 的同预算对照（已有线性参照，LSTM 基线尚未实现），再考虑更多频率组和预测长度。完整实验设计见 [docs/experiments.md](docs/experiments.md)。
+下一阶段：在 ETTh1 与 Electricity 上完成 standard/head/shared_group/grouped 的同预算对照（已有线性参照与外部基线），再考虑更多频率组和预测长度。完整实验设计见 [docs/experiments.md](docs/experiments.md)。
 
 ## 10. 项目来源
 
