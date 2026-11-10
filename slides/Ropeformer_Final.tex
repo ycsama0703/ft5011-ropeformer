@@ -60,7 +60,7 @@
 %----------------------------------------------------------------------------------------
 %    TITLE
 %----------------------------------------------------------------------------------------
-\title[Learning the Rhythm: RoPE beyond the training horizon]{Learning the Rhythm: Why RoPE Breaks Beyond the Training Horizon, and How Learnable Frequencies Fix It}
+\title[Learning the Rhythm: RoPE beyond the training horizon]{Learning the Rhythm: Why RoPE Degrades Beyond the Training Horizon, and How Learnable Frequencies Help}
 \author[Liu, Zhang, Ma]{Liu Yuncong \quad Zhang Yihang \quad Ma Xiaoyu}
 \institute[NUS]{FT5011 Deep Learning for Finance \\ National University of Singapore}
 \date{11 November 2026}
@@ -100,13 +100,13 @@ Train once on a short horizon, then forecast \textbf{any} horizon:
 \begin{frame}{The problem: silent failure beyond the training horizon}
 \begin{columns}[T]
 \column{0.6\textwidth}
-\textbf{What happens.} Trained for 96 steps (4 days), asked for 720 (30 days): the forecast breaks down beyond the training horizon.
+\textbf{What happens.} Trained for 96 steps (4 days), asked for 720 (30 days): the error rises sharply beyond the training horizon.
 
 \smallskip
 \textbf{Why it matters.}
 \begin{itemize}
 \item \textbf{Silent}: fine at the training horizon, no warning beyond it.
-\item \textbf{Common}: RoPE is standard in LLMs and time-series models.
+\item \textbf{Common}: RoPE is widely used in LLMs and time-series models.
 \item \textbf{Costly}: the alternative is one model per horizon.
 \end{itemize}
 \column{0.36\textwidth}
@@ -115,7 +115,7 @@ Train once on a short horizon, then forecast \textbf{any} horizon:
 {\scriptsize error at 720 steps vs.\ a model trained for 720 (Electricity)}
 \end{columns}
 \vspace{0.15cm}
-\begin{block}{Why it happens (pages 12, 18--19)}
+\begin{block}{Our explanation (evidence on pages 12, 18--19)}
 RoPE's \textbf{fixed periods} do not match the \textbf{daily cycle}: each day the same hour gets a slightly different position code, so far ahead the model meets codes it never saw.
 \end{block}
 \end{frame}
@@ -131,14 +131,14 @@ RoPE's \textbf{fixed periods} do not match the \textbf{daily cycle}: each day th
 \column{0.48\textwidth}
 \textbf{What we actually found.}
 \begin{itemize}
-\item At the training horizon the scales \textbf{barely move} ($\pm10\%$); accuracy unchanged.
-\item Heads do \textbf{not} specialise to different scales.
-\item Beyond the training horizon they make a \textbf{huge} difference.
+\item At the training horizon the scales \textbf{barely move} ($\pm10\%$); accuracy changes little.
+\item Heads learn \textbf{similar} scales.
+\item Beyond the training horizon they make a \textbf{large} difference.
 \end{itemize}
 \end{columns}
 \vspace{0.3cm}
 \begin{alertblock}{This talk}
-Why does RoPE break beyond the training horizon, why do 4 parameters per layer fix it, and what does it mean for finance?
+Why does RoPE degrade beyond the training horizon, how much do 4 parameters per layer help, and what does it mean for finance?
 \end{alertblock}
 \end{frame}
 
@@ -204,7 +204,7 @@ small $\omega_i$ → long-term/low-frequency.
 \vspace{1mm}
 \textbf{Head-wise scaling (our proposal).}
 $\omega_i^{(h)}=\omega_i\,e^{a_h}$ was meant to let heads specialise on distinct horizons.
-\alert{We find instead that the learned scale aligns the \textbf{fastest} block ($\omega_0=1$ rad/token, period $2\pi\approx6.28$ tokens) with the daily cycle.}
+\alert{In our experiments the learned scale instead moves the \textbf{fastest} block ($\omega_0=1$ rad/token, period $2\pi\approx6.28$ tokens) close to the daily cycle.}
 \end{frame}
 
 % ===================== Method =====================
@@ -323,21 +323,21 @@ Exchange & \textbf{0.089} & 0.103 & 0.099\\\bottomrule
 \end{tabular}
 \vspace{0.3cm}
 \begin{itemize}
-\item The Transformer is close to published results (PatchTST: Electricity 0.129, Weather 0.149).
+\item The Transformer is close to published results (PatchTST/42: Electricity 0.130, Weather 0.152).
 \item Linear models remain strong (as reported by DLinear).
-\item Learnable scales neither help nor hurt here --- the effect lies \textbf{beyond} the horizon.
+\item Fixed vs.\ learnable differ by about one seed std or less here --- the main effect lies \textbf{beyond} the horizon.
 \end{itemize}
 \end{frame}
 
-\begin{frame}{Result 2: fixed RoPE collapses beyond it}
+\begin{frame}{Result 2: fixed RoPE degrades beyond it}
 \begin{columns}[c]
 \column{0.7\textwidth}\centering
 \includegraphics[width=\textwidth]{figs/fig1_perstep.pdf}\\
 {\scriptsize Test MSE per forecast step; trained at $H=96$ (dashed line).}
 \column{0.28\textwidth}\centering
 {\huge\bfseries\color{fixedc}6.4$\times$}\\{\scriptsize error of fixed RoPE at 720 steps vs.\ a model trained at 720 (Electricity)}\\[0.35cm]
-{\huge\bfseries\color{learnc}38--66\%}\\{\scriptsize of that error removed by learnable scales}\\[0.35cm]
-{\huge\bfseries\color{navy}6\,/\,6}\\{\scriptsize runs significant (Diebold--Mariano) on Electricity, ETTh1, ETTm1}
+{\huge\bfseries\color{learnc}38--66\%}\\{\scriptsize lower error with learnable scales (Electricity, ETTh1, ETTm1)}\\[0.35cm]
+{\huge\bfseries\color{navy}6\,/\,6}\\{\scriptsize runs improve, each significant (Diebold--Mariano), on all three}
 \end{columns}
 \end{frame}
 
@@ -353,7 +353,7 @@ Test MSE, steps 1--720 & fixed & learnable & $+\,/\,-$ & learnable & Transformer
 \vspace{0.3cm}
 \begin{itemize}\small
 \item Strong, significant gains on seasonal data: Electricity, ETTh1, ETTm1 and \textbf{both electricity markets}.
-\item No gain on Weather and Exchange rates (DM: mixed signs) --- explained on the next slides.
+\item No consistent gain on Weather and Exchange rates (DM results of mixed sign) --- explained on the next slides.
 \item DM column: of 6 runs (3 seeds $\times$ 2 bases), how many are significantly better\,/\,worse ($p<0.05$).
 \end{itemize}
 \end{frame}
@@ -366,13 +366,13 @@ Test MSE, steps 1--720 & fixed & learnable & $+\,/\,-$ & learnable & Transformer
 \begin{itemize}
 \item ETTm1: 1 day = 6 tokens $\Rightarrow$ aligned scale $2\pi/6=\mathbf{1.047}$.
 \item Learned scales average \textbf{1.04} --- in both layers.
-\item \textbf{Fixed at 1.047, no learning}: as good as learning.
-\item 5\% too slow (0.955) or fast (1.10): collapses like standard RoPE.
+\item \textbf{Fixed at 1.047, no learning}: matches the learned model.
+\item 5\% too slow (0.955) or fast (1.10): degrades like standard RoPE.
 \item DM test 1.047 vs 0.955: $p<10^{-15}$ in 6/6 runs.
 \end{itemize}
 \end{columns}
-\begin{alertblock}{Mechanism}
-Learning works because it \textbf{tunes RoPE's fastest rotation to the daily cycle}.
+\begin{alertblock}{Explanation supported by the evidence}
+Learning helps by moving \textbf{RoPE's fastest rotation close to the daily cycle}.
 \end{alertblock}
 \end{frame}
 
@@ -392,7 +392,7 @@ Learning works because it \textbf{tunes RoPE's fastest rotation to the daily cyc
 \centering
 \includegraphics[width=0.86\textwidth]{figs/fig3_periodicity.pdf}
 \begin{itemize}\small
-\item \textbf{Datasets}: strongest cycle (Electricity) gains most; no cycle (Exchange) gains nothing.
+\item \textbf{Datasets}: strongest cycle (Electricity) gains most; no cycle (Exchange): no consistent effect.
 \item \textbf{Channels}: in Weather only the 3 solar-radiation channels gain --- so Weather as a whole shows none.
 \end{itemize}
 \end{frame}
@@ -415,8 +415,8 @@ EPF-NP & \textbf{0.896} & 1.123 & 1.196\\\bottomrule
 \begin{itemize}\small
 \item One model trained on mixed horizons is within 3\% of, or better than, the model trained at 720 --- on \textbf{all 7 datasets}.
 \item Small cost at $H=96$ (Electricity 0.135 vs 0.128).
-\item With it, fixed and learnable RoPE perform alike: distant positions are no longer unseen.
-\item When long-horizon training \textbf{overfits} (small ETTh1, noisy EPF-NP), learnable scales + extrapolation are best.
+\item With it, fixed and learnable RoPE perform alike (distant positions are seen in training).
+\item When long-horizon training \textbf{overfits} (small ETTh1, noisy EPF-NP), learnable scales + extrapolation do better.
 \end{itemize}
 \end{columns}
 \end{frame}
@@ -438,11 +438,11 @@ EPF-NP $1.07\to\mathbf{0.90}$ (5/6 runs).
 \end{block}
 \end{columns}
 \vspace{0.2cm}
-\begin{alertblock}{Practical rules}
+\begin{alertblock}{Practical guidance from our results}
 \begin{enumerate}\small
 \item For \textbf{seasonal} financial series --- intraday volume \& volatility (daily U-shape), power \& gas prices --- use learnable or calendar-aligned RoPE before forecasting beyond the training horizon.
 \item To cover several risk horizons (1- \& 10-day VaR, HAR-style volatility) with \textbf{one model}, train on mixed horizons.
-\item For near-random-walk prices, do not expect position encodings to help.
+\item For near-random-walk prices, we saw no benefit from position encodings.
 \end{enumerate}
 \end{alertblock}
 \end{frame}
@@ -453,7 +453,8 @@ EPF-NP $1.07\to\mathbf{0.90}$ (5/6 runs).
 \begin{frame}{Limitations \& future work}
 \textbf{What did not work / limitations}
 \begin{itemize}
-\item Heads did not specialise to distinct time scales (the proposal's hypothesis).
+\item No evidence that heads specialise to distinct time scales (the proposal's hypothesis).
+\item Mechanism analyses cover ETTh1, ETTm1 and Weather only.
 \item Grouping frequencies (the starting repository's hypothesis) gave no extra gain.
 \item Small model (2 layers, $d=64$), 3--5 seeds (partly offset by DM tests).
 \item With point tokens instead of patches the effect is much noisier; linear models stay strong at the training horizon.
@@ -469,16 +470,16 @@ EPF-NP $1.07\to\mathbf{0.90}$ (5/6 runs).
 \begin{frame}{Takeaways}
 \vspace{-0.15cm}
 \begin{block}{1. The problem}
-RoPE forecasters trained at one horizon \textbf{collapse} beyond it: up to $6.4\times$ the error of a directly trained model.
+In our experiments, RoPE forecasters trained at one horizon \textbf{degrade sharply} beyond it: up to $6.4\times$ the error of a directly trained model.
 \end{block}
-\begin{block}{2. The cause}
-RoPE's rotation is \textbf{out of step with the daily cycle}; the far future looks unlike anything seen in training.
+\begin{block}{2. The likely cause}
+RoPE's rotation is \textbf{out of step with the daily cycle}; far-ahead positions look unlike those seen in training.
 \end{block}
-\begin{block}{3. The fix}
-4 learnable scales per layer \textbf{align} it (38--66\% less error, significant); mixed-horizon training lets \textbf{one model} match per-horizon models.
+\begin{block}{3. The remedies}
+4 learnable scales per layer \textbf{align} it (38--66\% less error, consistent across runs); one \textbf{mixed-horizon} model comes within 3\% of per-horizon models.
 \end{block}
 \begin{alertblock}{For finance}
-Works on seasonal markets (electricity prices); not on random-walk prices (exchange rates).
+Helped on seasonal markets (electricity prices); no consistent effect on random-walk prices (exchange rates).
 \end{alertblock}
 \end{frame}
 
@@ -501,9 +502,9 @@ Frequency scales & Test MSE\\\midrule
 \bottomrule\end{tabular}
 \column{0.48\textwidth}
 \begin{itemize}\small
-\item \textbf{Head diversity}: one scale shared by all heads = one per head. Hand-set spreads help little or hurt.\\$\Rightarrow$ heads do \emph{not} specialise to time scales.
-\item \textbf{Grouping}: the fast group learns the same value as the per-head scale; the slow group drifts with no effect.\\$\Rightarrow$ only the \textbf{fast} frequencies matter.
-\item \textbf{Gradient clipping}: inactive after warm-up --- ruled out.
+\item \textbf{Head diversity}: for extrapolation, one shared scale performs as well as one per head; hand-set spreads help little or hurt.\\$\Rightarrow$ no evidence the gain needs head specialisation.
+\item \textbf{Grouping}: the fast group learns the same value as the per-head scale; the slow group drifts with no measurable effect.\\$\Rightarrow$ the effect sits in the \textbf{fast} frequencies.
+\item \textbf{Gradient clipping}: inactive after warm-up, so not the cause.
 \end{itemize}
 \end{columns}
 \end{frame}
