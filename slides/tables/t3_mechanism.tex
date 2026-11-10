@@ -1,0 +1,14 @@
+\multicolumn{2}{l}{\emph{ETTh1, steps 1--336, 5 seeds}}\\
+Fixed RoPE (scale 1) & 0.676$\pm$0.022 \\
+Learnable, per head & 0.460$\pm$0.006 \\
+Learnable, grouped & 0.460$\pm$0.006 \\
+Learnable, shared by heads & 0.458$\pm$0.011 \\
+Fixed, mild spread (0.9--1.1) & 0.547$\pm$0.038 \\
+Fixed, wide spread (0.5--2.0) & 0.716$\pm$0.064 \\
+\midrule
+\multicolumn{2}{l}{\emph{ETTm1, steps 1--720, 3 seeds $\times$ 2 bases}}\\
+Fixed RoPE (scale 1) & 0.767$\pm$0.051 \\
+Learnable, per head & 0.488$\pm$0.033 \\
+Fixed 1.047 (= 1 day) & 0.459$\pm$0.013 \\
+Fixed 0.955 (misaligned) & 0.923$\pm$0.065 \\
+Fixed 1.10 (misaligned) & 0.809$\pm$0.044 \\
