@@ -73,3 +73,10 @@ which platforms were tested; do not imply CUDA/CI verification from CPU tests.
 - Keep checkpoints/data/results out of Git. Never commit tokens or .env files.
 - Do not publish to GitHub, push, or choose a project license without user direction.
 - Avoid changing the earlier D:/NUS/RopeFormer repository as part of this project.
+
+## Study directory
+
+`study/` and `src/grouped_rope/study/` hold the benchmark study (see study/FINDINGS.md;
+pooled last-token head, overlapping patches, seed-level Wilcoxon tests). Keep them
+reproducible: do not change `forecast_head="pooled"` behaviour, the `partial` mode, or
+the study's splits without rerunning `study/run_all.sh`.

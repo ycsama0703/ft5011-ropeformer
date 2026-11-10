@@ -9,8 +9,8 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 
-RoPEMode = Literal["none", "standard", "fixed_head", "head", "shared_group", "grouped"]
-ROPE_MODES = ("none", "standard", "fixed_head", "head", "shared_group", "grouped")
+RoPEMode = Literal["none", "standard", "fixed_head", "head", "shared_group", "grouped", "partial"]
+ROPE_MODES = ("none", "standard", "fixed_head", "head", "shared_group", "grouped", "partial")
 ForecastHead = Literal["horizon_tokens", "pooled"]
 
 
@@ -50,7 +50,7 @@ class ForecastConfig:
             raise ValueError("rope_base must be finite and greater than 1")
         if self.rope_mode not in ROPE_MODES:
             raise ValueError(f"Unknown rope_mode: {self.rope_mode}")
-        if self.rope_mode in ("shared_group", "grouped") and self.n_freq_groups > self.d_model // self.n_heads // 2:
+        if self.rope_mode in ("shared_group", "grouped", "partial") and self.n_freq_groups > self.d_model // self.n_heads // 2:
             raise ValueError("n_freq_groups cannot exceed the number of rotary coordinate pairs")
         if self.forecast_head not in ("horizon_tokens", "pooled"):
             raise ValueError("forecast_head must be 'horizon_tokens' or 'pooled'")
@@ -93,16 +93,16 @@ class GroupedRotaryEmbedding(nn.Module):
         pairs = self.head_dim // 2
         frequencies = cfg.rope_base ** (-torch.arange(pairs, dtype=torch.float32) / pairs)
         self.register_buffer("base_frequencies", frequencies)
-        groups = cfg.n_freq_groups if cfg.rope_mode in ("shared_group", "grouped") else 1
+        groups = cfg.n_freq_groups if cfg.rope_mode in ("shared_group", "grouped", "partial") else 1
         self.n_groups = groups
         sizes = [len(part) for part in torch.tensor_split(torch.arange(pairs), groups)]
         group_index = torch.repeat_interleave(torch.arange(groups), torch.tensor(sizes))
         self.register_buffer("group_index", group_index)
-        rows = 1 if cfg.rope_mode in ("none", "standard", "shared_group") else cfg.n_heads
+        rows = 1 if cfg.rope_mode in ("none", "standard", "shared_group", "partial") else cfg.n_heads
         scales = torch.zeros(rows, groups)
         if cfg.head_scale_init is not None:
             scales[:, 0] = torch.tensor(cfg.head_scale_init).log()
-        if cfg.rope_mode in ("none", "standard", "fixed_head"):
+        if cfg.rope_mode in ("none", "standard", "fixed_head", "partial"):
             self.register_buffer("log_scales", scales)
         else:
             self.log_scales = nn.Parameter(scales)
@@ -115,6 +115,8 @@ class GroupedRotaryEmbedding(nn.Module):
         if self.mode == "none":
             return self.base_frequencies.float().new_zeros(self.n_heads, self.base_frequencies.numel())
         scales = self.log_scales.float().exp()[:, self.group_index]
+        if self.mode == "partial":  # p-RoPE diagnostic: only group 0 (fastest pairs) rotates
+            scales = scales * (self.group_index == 0).float()
         return (self.base_frequencies.float()[None, :] * scales).expand(self.n_heads, -1)
 
     def forward(self, q: Tensor, k: Tensor) -> tuple[Tensor, Tensor]:

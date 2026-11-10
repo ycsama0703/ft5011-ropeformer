@@ -77,6 +77,20 @@ class RotaryTests(unittest.TestCase):
             self.assertEqual(sum(p.numel() for n, p in model.named_parameters() if n.endswith("log_scales")), count)
 
 
+class PartialRoPETests(unittest.TestCase):
+    def test_partial_mode_freezes_slow_pairs(self):
+        torch.manual_seed(5)
+        rotary = GroupedRotaryEmbedding(cfg(rope_mode="partial"))
+        q, k = torch.randn(2, 3, 9, 8), torch.randn(2, 3, 9, 8)
+        rq, rk = rotary(q, k)
+        slow = (rotary.group_index > 0).nonzero().flatten()
+        cols = torch.cat((slow, slow + 4))  # half-split pairing: j and j + m
+        torch.testing.assert_close(rq[..., cols], q[..., cols])
+        fast = (rotary.group_index == 0).nonzero().flatten()
+        self.assertFalse(torch.allclose(rq[..., fast], q[..., fast]))
+        self.assertEqual(sum(p.numel() for p in rotary.parameters()), 0)
+
+
 class ModelTests(unittest.TestCase):
     def test_output_backward_and_attention_parity(self):
         for head in ("horizon_tokens", "pooled"):

@@ -251,3 +251,7 @@ GroupedRoPE/
 本项目由早期 RopeFormer 方法原型重新整理，只保留相关模型思路。新包名为 grouped_rope，接口有意不兼容旧 oil 任务。旧 proposal、结果与历史设计文档没有带入此仓库，也不能作为本项目的实验依据。
 
 这是一个本地 Git 项目骨架，尚未连接远程仓库。发布或确定开源许可前由小组确认。
+
+## 附：RoPE 频率参数化基准研究（`study/`）
+
+`study/` 复用本包的 `GroupedRoPEForecaster`（`forecast_head="pooled", pooling="last"`），另有自带的数据管线与基线（`src/grouped_rope/study/`），以及 `model.py` 中新增的诊断模式 `rope_mode="partial"`（p-RoPE：慢频组不旋转）。覆盖 13 个数据集（含自建 Binance 加密货币波动率/成交量面板）、A/B/C/D/G=4/G=8/p-RoPE、逐点与重叠 patch 两种 token、3–5 个种子、确定性 GPU 算子与种子级 Wilcoxon 检验。用本仓库代码加载其模型文件可逐位复现全部结果，重训亦逐位一致。结论与全部数字见 [study/FINDINGS.md](study/FINDINGS.md)，结果文件在 `study/outputs/`，复现方法见 [study/README.md](study/README.md)。与 `tools/` 流程的测试集已核对完全一致，可用 `study/merge_external.py` 合表。
