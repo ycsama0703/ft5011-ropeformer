@@ -1,520 +1,252 @@
-\documentclass[11pt]{article}
-\usepackage[a4paper,margin=2.2cm]{geometry}
+\documentclass[12pt]{article}
+\usepackage[a4paper,margin=2cm]{geometry}
 \usepackage{amsmath,amsthm}
 \usepackage{newtxtext,newtxmath}
-\usepackage{graphicx,booktabs,url,xcolor,caption,subcaption,enumitem,multirow}
+\usepackage{graphicx,booktabs,url,xcolor,caption,enumitem,float}
 \usepackage{tikz}
-\usetikzlibrary{positioning,decorations.pathreplacing,calc}
-\usepackage{float}
+\usetikzlibrary{positioning,decorations.pathreplacing}
 \usepackage{xurl}
 \usepackage[hidelinks]{hyperref}
-\captionsetup{font=small,labelfont=bf,skip=4pt}
-\setlist{nosep,leftmargin=*,topsep=2pt}
-\setlength{\parskip}{3pt}
-\setlength{\textfloatsep}{10pt}
-\setlength{\floatsep}{8pt}
-\setlength{\intextsep}{8pt}
+\captionsetup{font=small,labelfont=bf,skip=3pt}
+\setlist{nosep,leftmargin=*}
+\setlength{\parskip}{2pt}
+\setlength{\textfloatsep}{7pt}
+\setlength{\floatsep}{6pt}
+\setlength{\intextsep}{6pt}
+\setlength{\abovedisplayskip}{4pt}\setlength{\belowdisplayskip}{4pt}
 \newtheorem{proposition}{Proposition}
 \definecolor{histc}{HTML}{2A78D6}
 \definecolor{futc}{HTML}{EB6834}
 \definecolor{ink2}{HTML}{52514E}
 
-\title{\textbf{Learning the Rhythm: Why Rotary Position Encoding Degrades Beyond the Training Horizon, and How Learnable Frequencies Help}}
-\author{Liu Yuncong \qquad Zhang Yihang \qquad Ma Xiaoyu\\[2pt]
-{\normalsize FT5011 Deep Learning in Finance, National University of Singapore}}
-\date{November 2026}
+\title{\vspace{-1.7cm}\textbf{Learning the Rhythm: Why Rotary Position Encoding Degrades Beyond the Training Horizon, and How Learnable Frequencies Help}}
+\author{Liu Yuncong, Zhang Yihang, Ma Xiaoyu \quad {\normalsize(FT5011, National University of Singapore)}}
+\date{\vspace{-1.0cm}}
 
 \makeatletter\let\inputtab\@@input\makeatother
 \begin{document}
 \maketitle
 
 \begin{abstract}\noindent
-Forecasters in finance and energy need predictions at several horizons at once, yet a model is usually trained for one horizon.
-A Transformer that represents each future step by a placeholder token, distinguished only by its rotary position encoding (RoPE), can in principle be trained once and queried at any horizon.
-We show that with standard RoPE this fails: trained for 96 steps and asked for 720 (4 versus 30 days on hourly data), its error reaches up to 6.4 times that of a model trained for 720 steps.
-Adding a learnable scale to the RoPE frequencies of each attention head --- 4 parameters per layer, initialised at standard RoPE --- reduces this error by 38--66\% on three seasonal benchmarks and by 16--38\% on two electricity markets, significant by Diebold--Mariano tests in all runs on the benchmarks and in 5--6 of 6 runs on the markets.
-We trace the effect to a precise mechanism.
-Standard RoPE's fastest rotation is out of step with the daily cycle, so the position code of a given hour drifts from day to day; beyond the training horizon a same-hour history patch carries the code of a different hour, and the attention of the forecast tokens moves exactly to the hour that RoPE arithmetic predicts.
-On ETTm1 the learned scales move towards the day-aligned value $2\pi/6$; fixing the scale at this value without learning gives the same gain, values 5\% off do not, and resetting the learned scales to 1 at test time brings the failure back.
-On exchange rates, which have no daily cycle, the scales have no consistent effect.
-Training one model on mixed horizons is a complementary remedy that comes within 3\% of models trained per horizon.
+Finance needs forecasts at several horizons, yet a model is usually trained for one.
+A Transformer that represents each future step by a placeholder token, told apart only by rotary position encoding (RoPE), can be trained once and queried at any horizon --- but with standard RoPE, trained at 96 steps and asked for 720, its error reaches 6.4 times that of a model trained at 720.
+A learnable scale on each head's RoPE frequencies (4 parameters per layer) cuts this error by 38--66\% on seasonal benchmarks and 16--38\% on two electricity markets.
+We trace the effect to phase drift: RoPE's fastest rotation is out of step with the daily cycle, so far-ahead positions carry the code of a different hour, and attention moves to exactly the hour that RoPE arithmetic predicts.
+Fixing the day-aligned scale reproduces the gain; resetting the learned scales removes it.
 \end{abstract}
 
-% =====================================================================
-\section{Introduction}
-\label{sec:intro}
+\section{Problem, motivation and related work}
+Risk managers report Value-at-Risk at 1 and 10 days, HAR volatility models combine daily, weekly and monthly components \cite{corsi2009}, and energy traders bid day-ahead and hedge the next week \cite{weron2014}.
+Deep long-horizon forecasters, however, are trained \emph{per horizon} \cite{zeng2023dlinear,nie2023patchtst}; a model trained once and queried at any horizon would remove this cost.
+Our proposal gave each attention head a learnable multiplier on its RoPE frequencies \cite{su2021roformer}, expecting heads to specialise to time scales like HAR's components.
+At the training horizon this was not supported: the scales stayed within 10\% of 1, heads learned similar values and accuracy barely changed.
+The same scales, however, mattered greatly \emph{beyond} the training horizon.
+\textbf{Contributions:} (i) we document a silent failure of RoPE forecasters beyond the training horizon; (ii) four learnable scales per layer largely fix it; (iii) we derive the mechanism --- phase drift relative to the daily cycle --- and verify its prediction in the attention weights.
+\textbf{Related work.} Transformer forecasters \cite{zhou2021informer,nie2023patchtst} are evaluated at fixed horizons, and linear models are strong baselines \cite{zeng2023dlinear}.
+RoPE length extrapolation is studied for language models through frequency interpolation and rescaling \cite{peng2024yarn}; text has no period, whereas time series do, so the relevant question becomes whether RoPE's rotation is commensurate with the calendar.
 
-Many forecasting problems in finance require several horizons at once.
-Risk managers report Value-at-Risk at one and ten days; volatility models such as HAR combine daily, weekly and monthly components \cite{corsi2009}; energy traders bid in the day-ahead market and hedge the following week \cite{weron2014}.
-The usual practice in deep long-horizon forecasting is a \emph{direct} model per horizon \cite{taieb2012}: to cover 96, 192, 336 and 720 steps, four models are trained, tuned and maintained \cite{zeng2023dlinear,nie2023patchtst}.
-A model that is trained once and can be asked for any horizon would remove this cost.
-
-Transformers \cite{vaswani2017} can be built to do this.
-If every future step is represented by a learnable \emph{placeholder} token that attends to the history, the number of forecast steps is simply the number of placeholders, and a model trained with 6 placeholders can be run with 45.
-All placeholders share one vector, so the only thing that tells them apart is their position encoding.
-Rotary position encoding (RoPE) \cite{su2021roformer}, the standard choice in current language models and increasingly in time-series models, encodes position by rotating query and key vectors, so that attention depends on the relative distance between tokens.
-Whether such a model actually forecasts well beyond its training horizon is therefore a question about RoPE.
-
-Our project started from a different hypothesis.
-We proposed to give each attention head a learnable multiplier on its RoPE frequencies, expecting heads to specialise to different time scales --- a learnable analogue of HAR's fixed daily, weekly and monthly components.
-At the training horizon this hypothesis received little support: the learned scales stayed within about 10\% of 1, heads learned similar values, and accuracy changed little.
-The same scales, however, made a large difference as soon as the model was asked to forecast \emph{beyond} its training horizon, and this report is about that effect.
-
-\paragraph{Contributions.}
-\begin{enumerate}
-\item We document a \emph{silent} failure of RoPE forecasters: trained at $H{=}96$ and queried at $H{=}720$, a patch Transformer with standard RoPE reaches 1.5--6.4 times the error of a model trained at 720 on three benchmarks, without any sign of trouble at the training horizon (Sec.~\ref{sec:extrap}).
-\item We show that per-head learnable RoPE scales, 4 parameters per layer, reduce this error by 38--66\% on Electricity, ETTh1 and ETTm1 and by 16--38\% on two day-ahead electricity markets, significant in every run on the benchmarks and in 5--6 of 6 runs on the markets (Sec.~\ref{sec:extrap}, \ref{sec:finance}).
-\item We identify the mechanism: phase drift of RoPE's fastest rotation relative to the daily cycle. A short derivation predicts which hour a far-ahead position code will be confused with; the forecast tokens' attention follows this prediction, and alignment interventions (fixing the day-aligned value; resetting the learned scales) reproduce and remove the failure (Sec.~\ref{sec:method-phase}, \ref{sec:mechanism}).
-\item We compare with multi-horizon training as an alternative remedy and give practical guidance for financial series (Sec.~\ref{sec:multi}, \ref{sec:finance}).
-\end{enumerate}
-
-% =====================================================================
-\section{Related work}
-\label{sec:related}
-
-\paragraph{Transformers for long-horizon forecasting.}
-Informer \cite{zhou2021informer}, Autoformer \cite{wu2021autoformer} and FEDformer \cite{zhou2022fedformer} adapted attention to long sequences; PatchTST \cite{nie2023patchtst} showed that patching the input and treating channels independently gives strong results, and iTransformer \cite{liu2024itransformer} attends across variables instead of time.
-DLinear \cite{zeng2023dlinear} found that a single linear layer often matches these models, and we use a linear model as a reference throughout.
-TimesNet \cite{wu2023timesnet} models multiple periods explicitly through a 2D reshaping of the series.
-These models are trained and evaluated at fixed horizons; we study what happens when a model trained at one horizon is queried at a longer one.
-
-\paragraph{Position encodings and length extrapolation.}
-Sinusoidal and learned absolute encodings \cite{vaswani2017} were followed by relative encodings; RoPE \cite{su2021roformer} realises relative attention through rotations.
-In language models, extrapolating RoPE beyond the training context is a known problem, addressed by position interpolation \cite{chen2023pi}, frequency rescaling such as YaRN \cite{peng2024yarn}, or attention biases such as ALiBi \cite{press2022alibi}; recent analyses study which RoPE frequencies models actually use \cite{barbero2025rope}.
-Those methods target text, which has no fixed period.
-In time series the relevant failure is different: the data have a calendar period, and extrapolation succeeds when RoPE's rotation is commensurate with it.
-
-\paragraph{Multi-horizon forecasting and seasonality in finance.}
-Direct, recursive and multi-output strategies for multi-step forecasting are reviewed by \cite{taieb2012}; mixed-frequency (MIDAS) regressions \cite{ghysels2006} and HAR \cite{corsi2009} combine several horizons by design.
-Intraday volatility and volume have strong daily periodicity \cite{andersen1997}, and electricity prices have daily and weekly cycles \cite{weron2014,lago2021}, whereas exchange rates are hard to beat with a random walk \cite{meese1983}.
-These facts predict where a calendar-aligned position encoding should help, and we use them to choose financial test cases.
-
-% =====================================================================
-\section{Method}
-\label{sec:method}
-
-\subsection{Problem setting}
-Given the last $L$ observations $x_{t-L+1:t}$ of a univariate series, the model forecasts $\hat x_{t+1:t+H}$.
-Multivariate datasets are handled channel-independently: every variable is its own series \cite{nie2023patchtst}.
-We train with $H_{\text{train}}{=}96$ and evaluate the same model at $H\le 720$.
-A \emph{step} is one observation; on hourly data 96 steps are 4 days and 720 steps 30 days.
-
-\subsection{Backbone with forecast placeholders}
-\label{sec:backbone}
+\section{Model and method}
 \begin{figure}[t]\centering
-\begin{tikzpicture}[x=0.5cm,y=0.5cm,
-  h/.style={draw=histc,fill=histc!12,minimum width=0.42cm,minimum height=0.55cm,inner sep=0pt},
-  f/.style={draw=futc,fill=futc!12,minimum width=0.42cm,minimum height=0.55cm,inner sep=0pt,font=\tiny}]
-  % token row
+\begin{tikzpicture}[x=0.48cm,y=0.48cm,
+  h/.style={draw=histc,fill=histc!12,minimum width=0.36cm,minimum height=0.48cm,inner sep=0pt},
+  f/.style={draw=futc,fill=futc!12,minimum width=0.36cm,minimum height=0.48cm,inner sep=0pt,font=\tiny}]
   \foreach \i in {0,...,6} \node[h] (h\i) at (\i,0) {};
   \node at (7.1,0) {\small$\cdots$};
   \foreach \i in {8,9} \node[h] (h\i) at (\i,0) {};
   \foreach \i in {11,...,14} \node[f] (f\i) at (\i,0) {$m$};
   \node at (15.1,0) {\small$\cdots$};
   \node[f] (f16) at (16,0) {$m$};
-  \node[above=1pt of h0,font=\tiny,histc] {0};
-  \node[above=1pt of h9,font=\tiny,histc] {20};
-  \node[above=1pt of f11,font=\tiny,futc] {21};
-  \node[above=1pt of f16,font=\tiny,futc] {$20{+}\lceil H/P\rceil$};
-  \draw[decorate,decoration={brace,amplitude=4pt,mirror}] (-0.4,-0.7) -- (9.4,-0.7)
-     node[midway,below=4pt,font=\scriptsize,align=center]{21 history tokens\\(336 steps, patches of $P{=}16$)};
-  \draw[decorate,decoration={brace,amplitude=4pt,mirror}] (10.6,-0.7) -- (16.4,-0.7)
-     node[midway,below=4pt,font=\scriptsize,align=center]{one shared placeholder $m$\\per future patch};
-  \node[font=\scriptsize,ink2,anchor=west] at (-0.5,1.6) {token position (RoPE) $\rightarrow$};
-  % mask
-  \begin{scope}[shift={(19.5,-1.6)},x=0.42cm,y=0.42cm]
+  \node[above=0pt of h0,font=\tiny,histc] {pos 0};
+  \node[above=0pt of h9,font=\tiny,histc] {20};
+  \node[above=0pt of f11,font=\tiny,futc] {21};
+  \node[above=0pt of f16,font=\tiny,futc] {$20{+}\lceil H/16\rceil$};
+  \draw[decorate,decoration={brace,amplitude=3pt,mirror}] (-0.4,-0.65) -- (9.4,-0.65)
+     node[midway,below=3pt,font=\scriptsize]{21 history patches (336 steps)};
+  \draw[decorate,decoration={brace,amplitude=3pt,mirror}] (10.6,-0.65) -- (16.4,-0.65)
+     node[midway,below=3pt,font=\scriptsize]{shared placeholder $m$ per future patch};
+  \begin{scope}[shift={(18.5,-1.9)},x=0.42cm,y=0.42cm]
     \foreach \r in {0,...,7} \foreach \c in {0,...,7} {
-      \pgfmathtruncatemacro{\ok}{ (\r<5 && \c<5) || (\r>=5 && \c<5) || (\r>=5 && \r==\c) ? 1 : 0}
+      \pgfmathtruncatemacro{\ok}{ (\c<5) || (\r>=5 && \r==\c) ? 1 : 0}
       \ifnum\ok=1
         \pgfmathtruncatemacro{\isf}{\r>=5 ? 1 : 0}
         \ifnum\isf=1 \fill[futc!55] (\c,7-\r) rectangle ++(1,1); \else \fill[histc!45] (\c,7-\r) rectangle ++(1,1); \fi
       \fi
-      \draw[white,line width=0.5pt] (\c,7-\r) rectangle ++(1,1);
+      \draw[white,line width=0.4pt] (\c,7-\r) rectangle ++(1,1);
     }
     \draw[ink2] (0,0) rectangle (8,8);
     \draw[ink2,dashed] (5,0) -- (5,8); \draw[ink2,dashed] (0,3) -- (8,3);
-    \node[font=\scriptsize,ink2,above] at (4,8) {attention mask};
-    \node[font=\tiny,ink2,rotate=90] at (-0.6,5.5) {history};
-    \node[font=\tiny,ink2,rotate=90] at (-0.6,1.5) {placeholders};
-    \node[font=\tiny,ink2] at (2.5,-0.5) {keys: history};
-    \node[font=\tiny,ink2] at (6.6,-0.5) {placeh.};
+    \node[font=\tiny,ink2,anchor=west] at (8.2,5.5) {history};
+    \node[font=\tiny,ink2,anchor=west] at (8.2,1.5) {placeholders};
+    \node[font=\tiny,ink2,above] at (4,8) {attention mask};
   \end{scope}
 \end{tikzpicture}
-\caption{The forecaster. Left: the history is cut into non-overlapping patches; one learnable placeholder per future patch is appended, and all placeholders share the same vector, so only their RoPE positions distinguish them. Right: attention mask (coloured = allowed). History tokens attend to history; a placeholder attends to all history and to itself only, so the forecast of step $h$ does not depend on the total horizon $H$.}
-\label{fig:arch}
-\end{figure}
+\caption{Forecaster. Left: history patches and one shared placeholder per future patch; only RoPE positions distinguish placeholders. Right: mask (coloured = allowed): history sees history; a placeholder sees history and itself, so the forecast for step $h$ does not depend on $H$.}
+\label{fig:arch}\end{figure}
 
-Figure~\ref{fig:arch} shows the model.
-The history of $L{=}336$ steps is cut into $N{=}21$ non-overlapping patches of $P{=}16$ steps, each linearly projected to $d{=}64$ dimensions.
-After the history tokens we append $\lceil H/P\rceil$ placeholder tokens at positions $N,\dots,N{+}\lceil H/P\rceil{-}1$ (6 for $H{=}96$, 45 for $H{=}720$); all placeholders equal one learnable vector $m\in\mathbb{R}^d$.
-The sequence is processed by a 2-layer, 4-head pre-norm Transformer encoder, and a shared linear layer maps each placeholder's output to the $P$ values of its future patch.
-The attention mask (Fig.~\ref{fig:arch}, right) lets history tokens attend only to history and each placeholder attend to the history and to itself.
-Two properties follow and are covered by unit tests: the history representation does not depend on $H$, and the forecast of step $h$ is identical whether the model is asked for $H$ or $H'>H$ steps.
-The model can therefore be queried at any horizon after training, and steps beyond $H_{\text{train}}$ are pure extrapolation.
-RoPE is the only source of position information; no absolute encoding is added.
+\textbf{Backbone} (Fig.~\ref{fig:arch}). A univariate history of $L{=}336$ steps is cut into 21 patches of 16 steps, projected to $d{=}64$, and followed by $\lceil H/16\rceil$ placeholder tokens that all equal one learnable vector $m$.
+A 2-layer, 4-head pre-norm encoder processes the sequence and a shared linear layer reads each placeholder into 16 forecast values.
+With the mask of Fig.~\ref{fig:arch}, history representations do not depend on $H$ and step $h$'s forecast is identical for any $H\ge h$ (unit-tested), so a model trained with 6 placeholders ($H{=}96$) can be queried with 45 ($H{=}720$).
+We chose patches because point tokens gave much noisier extrapolation, and placeholders (rather than a flat output layer) because only they make the horizon a model input; RoPE is the only position signal.
 
-\subsection{Rotary position encoding}
-For an attention head of dimension $d_h$ with $m{=}d_h/2$ coordinate pairs, RoPE rotates pair $j$ of the query at position $t$ and of the key at position $u$ by angles $t\omega_j$ and $u\omega_j$, where
+\textbf{RoPE.} Pair $j$ of a head's query/key coordinates is rotated by $t\omega_j$ at position $t$, $\omega_j=b^{-j/8}$ ($b\in\{10^3,10^4\}$, 8 pairs).
+Since $R(\alpha)^\top R(\beta)=R(\beta-\alpha)$, the attention logit between positions $t$ and $u=t+\Delta$ is
 \begin{equation}
-\omega_j=b^{-j/m},\qquad j=0,\dots,m-1,
+s(\Delta)=\tfrac{1}{\sqrt{d_h}}\textstyle\sum_{j}\big[a_j\cos(\omega_j\Delta)+c_j\sin(\omega_j\Delta)\big],
 \end{equation}
-with base $b$ (we use $b\in\{10^3,10^4\}$ and $m{=}8$).
-Writing $q^{(j)},k^{(j)}\in\mathbb{R}^2$ for the pairs and $R(\theta)$ for the $2{\times}2$ rotation, $R(\alpha)^\top R(\beta)=R(\beta-\alpha)$ gives the attention logit
-\begin{equation}
-s(t,u)=\frac{1}{\sqrt{d_h}}\sum_{j=0}^{m-1}{q^{(j)}}^{\!\top} R\big(\omega_j\,(u-t)\big)\,k^{(j)}
-=\frac{1}{\sqrt{d_h}}\sum_{j=0}^{m-1}\Big[a_j\cos\big(\omega_j\Delta\big)+c_j\sin\big(\omega_j\Delta\big)\Big],
-\label{eq:rope}
-\end{equation}
-with $\Delta=u-t$ and content-dependent coefficients $a_j=\langle q^{(j)},k^{(j)}\rangle$, $c_j=q^{(j)}_2k^{(j)}_1-q^{(j)}_1k^{(j)}_2$.
-Attention thus depends on position only through the lag $\Delta$, and each pair contributes a sinusoid of the lag.
-The fastest pair has $\omega_0{=}1$ rad per token for every base, i.e.\ it completes one turn every $2\pi\approx6.28$ tokens.
+with content-dependent $a_j,c_j$: attention sees only the lag, and each pair adds a sinusoid of it. The fastest pair turns at $\omega_0{=}1$ rad per token for every base.
 
-\subsection{Learnable frequency scales}
-\label{sec:scales}
-Our method gives each layer $\ell$ and head $h$ a scalar $a_{\ell,h}$ and uses the frequencies
-\begin{equation}
-\hat\omega_{\ell,h,j}=\omega_j\,e^{a_{\ell,h}},\qquad a_{\ell,h}=0\ \text{at initialisation}.
-\label{eq:scale}
-\end{equation}
-The log-parameterisation keeps frequencies positive; at initialisation the model is exactly standard RoPE; the cost is one parameter per head (4 per layer) and no change in compute.
-Rotations are evaluated directly at every position, never interpolated from a cache, so any horizon is valid.
-Scales are trained jointly with all other weights, in a separate optimiser group without weight decay.
+\textbf{Learnable scales (our method).} Each layer $\ell$ and head $h$ uses $\hat\omega_{\ell,h,j}=\omega_j e^{a_{\ell,h}}$ with $a_{\ell,h}{=}0$ at initialisation (exactly standard RoPE), trained jointly without weight decay: 4 parameters per layer, no extra compute.
+Ablations use the same backbone with \emph{grouped} scales (fast and slow pairs separately), \emph{shared} scales (one per layer) or \emph{fixed} hand-set scales.
 
-To understand \emph{why} the scales help, we compare variants that share the backbone and differ only in Eq.~\eqref{eq:scale}:
-\emph{fixed RoPE} ($a{=}0$, not trained);
-\emph{grouped} (separate scales for the 4 fastest and the 4 slowest pairs of each head, the starting repository's hypothesis);
-\emph{shared} (one scale per layer for all heads);
-and \emph{fixed scales} set by hand and frozen --- either spread across heads or aligned to the daily cycle (Sec.~\ref{sec:method-phase}).
-
-\subsection{Why extrapolation needs phase alignment}
-\label{sec:method-phase}
-Suppose the series has a period of $T$ tokens (one day).
-The fastest pair encodes a lag $\Delta$ by the angle $\hat\omega_0\Delta$.
-Lags that are a whole number of days apart, $\Delta$ and $\Delta+nT$, describe the same time of day; their angles differ by $n\hat\omega_0T$.
-
-\begin{proposition}[Phase alignment]
-If $\hat\omega_0T=2\pi k$ for an integer $k$, the fastest pair assigns identical rotations to $\Delta$ and $\Delta+nT$ for every $n$. Otherwise, each additional day shifts the code by the phase drift
-\begin{equation}
-\delta=\operatorname{wrap}\!\big(\hat\omega_0T\big)\in(-\pi,\pi],
-\label{eq:drift}
-\end{equation}
-so after $n$ days the same hour carries a code rotated by $n\delta$.
+\textbf{Why alignment matters.} Let one day be $T$ tokens. Lags $\Delta$ and $\Delta+nT$ are the same time of day, and the fastest pair encodes them with angles differing by $n\hat\omega_0T$.
+\begin{proposition}
+If $\hat\omega_0T=2\pi k$ ($k\in\mathbb{Z}$), the fastest pair gives $\Delta$ and $\Delta{+}nT$ identical codes for all $n$; otherwise each day rotates the code by the drift $\delta=\mathrm{wrap}(\hat\omega_0T)$.
 \end{proposition}
-\noindent The proof is immediate from $R(\hat\omega_0(\Delta+nT))=R(\hat\omega_0\Delta)R(n\hat\omega_0T)$.
-During training, placeholders see only lags up to $N+\lceil H_{\text{train}}/P\rceil-1$ (26 tokens, 4.3 days on ETTm1), and the model can learn the codes of these lags individually.
-Beyond them it meets codes it has never seen.
-With drift, a far-ahead same-hour lag has the code of a \emph{different} hour seen in training, and a model that learned ``look at the same time of day'' should attend to that wrong hour.
-For ETTm1 with patches of 16 steps, one day is $T{=}6$ tokens; standard RoPE has $\hat\omega_0T=6$ rad and drifts by $6-2\pi\approx-0.28$ rad ($-16^\circ$) per day, while the aligned scale is $e^{a}=2\pi/6\approx1.047$.
-Figure~\ref{fig:phase} illustrates the drift and, for every lag, which hour of the training range its code resembles most; this prediction uses no trained model and is tested against attention in Sec.~\ref{sec:mechanism}.
+Training only shows placeholders lags up to 26 tokens; beyond them, with drift, a same-hour lag carries the code of a \emph{different} hour seen in training, and a model that learned ``look at the same time yesterday'' should attend to that wrong hour.
+On ETTm1 (15-min data) one day is $T{=}6$ tokens: standard RoPE drifts by $6-2\pi\approx-16^\circ$ per day and the aligned scale is $2\pi/6\approx1.047$.
+\textbf{Multi-horizon training}, a second remedy, draws each batch's horizon from $\{96,192,336,720\}$ so distant placeholders are seen in training; unlike the scales, it needs 720-step targets.
 
-\begin{figure}[t]\centering
-\includegraphics[width=\linewidth]{figures/fig5_phase_drift.pdf}
-\caption{Phase drift of RoPE's fastest pair (ETTm1, one day = 6 tokens; pure arithmetic). (a,b) Angle of the same time of day $k$ days back; filled points are lags seen in training. With standard RoPE the angle moves $16^\circ$ per day; with scale $2\pi/6$ all days coincide. (c) Accumulated drift for several scales.}
-\label{fig:phase}\end{figure}
+\section{Data and experimental protocol}
+\textbf{Data} (URLs in Appendix B). Four benchmarks --- Electricity (321 series, hourly), ETTh1/ETTm1 (7 series, hourly/15-min), Weather (21, 10-min) --- and three financial markets chosen before seeing results: hourly day-ahead prices of Nord Pool and PJM (EPF-NP/PJM) \cite{lago2021}, which have daily cycles, and daily exchange rates of 8 currencies, which do not \cite{meese1983}.
+Each variable is forecast as its own series; splits are chronological (ETT 12/4/4 months, others 70/10/20\%); z-scores use training rows only; exchange rates get per-window normalisation (RevIN), without which every model fails.
 
-\subsection{Multi-horizon training}
-As a second, complementary remedy, each training batch uses a horizon drawn uniformly from 96, 192, 336 and 720 steps, so the model sees distant placeholders during training.
-This requires training targets 720 steps ahead, which learnable scales do not.
+\textbf{Protocol.} All models read $L{=}336$, train at $H{=}96$ and are tested at every step to 720 on the same windows; variants share backbone, optimiser, step budget, batch order and initial weights, differing only in RoPE frequencies.
+RoPE base and checkpoint are chosen on validation at $H{=}96$; the test set is never used for training or tuning.
+\textbf{Baselines:} fixed RoPE (isolates the mechanism), a linear map $\mathbb{R}^{336}{\to}\mathbb{R}^H$ (strong on these data \cite{zeng2023dlinear}), and models trained directly at 720.
+\textbf{Significance:} with 3 seeds $\times$ 2 bases we count improving runs, and within each run apply a Diebold--Mariano test \cite{diebold1995} to the per-origin loss difference on steps 97--720 (Newey--West, lag 719, for overlapping windows). Metric: MSE on the normalised scale.
 
-% =====================================================================
-\section{Experimental setup}
-\label{sec:setup}
-
-\paragraph{Data.}
-Table~\ref{tab:data} lists the seven datasets: four standard long-horizon benchmarks \cite{zhou2021informer,wu2021autoformer} and three financial markets --- hourly day-ahead electricity prices of Nord Pool (EPF-NP) and PJM (EPF-PJM) from the open EPF benchmark \cite{lago2021}, and daily exchange rates of 8 currencies.
-The financial datasets were chosen before any of their results were seen, as a test of the mechanism: electricity prices have strong daily cycles, exchange rates have none \cite{meese1983}.
-Splits are chronological (ETT: 12/4/4 months; others 70/10/20\%), z-score statistics are fitted on training rows only, and test targets never cross split borders.
-For exchange rates we add per-window normalisation (RevIN \cite{kim2022revin}) for every model, without which all models fail on this drifting series.
-Seasonal strength \cite{wang2006} is computed on training rows at the daily period.
-
-\begin{table}[t]\centering\small
-\caption{Datasets. Tokens/day: daily period in patch tokens (patch 16). Seasonal strength: median over channels of the daily seasonal strength on training rows (0 = none, 1 = purely periodic).}
-\label{tab:data}
-\begin{tabular}{llrrlcc}\toprule
-Dataset & Frequency & Length & Channels & Split & Tokens/day & Seasonal strength\\\midrule
-Electricity & hourly & 26{,}304 & 321 & 70/10/20 & 1.5 & 0.83\\
-ETTh1 & hourly & 17{,}420 & 7 & 12/4/4 mo. & 1.5 & 0.27\\
-ETTm1 & 15 min & 69{,}680 & 7 & 12/4/4 mo. & 6 & 0.27\\
-Weather & 10 min & 52{,}696 & 21 & 70/10/20 & 9 & 0.24\\
-EPF-NP (prices) & hourly & 52{,}416 & 1 & 70/10/20 & 1.5 & 0.25\\
-EPF-PJM (prices) & hourly & 52{,}416 & 1 & 70/10/20 & 1.5 & 0.13\\
-Exchange rates & daily & 7{,}588 & 8 & 70/10/20 & --- & 0.00\\\bottomrule
-\end{tabular}
-\end{table}
-
-\paragraph{Protocol.}
-All models read $L{=}336$ steps, are trained at $H{=}96$, and are evaluated at every step up to 720 on the same test windows (those that fit 720 steps).
-All variants share the backbone, optimiser, step budget, batch order and initial weights (paired seeds); they differ only in the RoPE frequencies.
-The RoPE base and the best checkpoint are chosen on the validation set at $H{=}96$; the test set is used once.
-We use 3 seeds and 2 bases (6 runs per variant and dataset), and 5 seeds for the ETTh1 ablations.
-Hyper-parameters are in Table~\ref{tab:hyper} (Appendix~\ref{app:repro}).
-We report MSE on the normalised scale.
-
-\paragraph{Baselines.}
-(i) \emph{Fixed RoPE}: the same model without scales, which isolates the mechanism;
-(ii) a channel-wise \emph{linear} map $\mathbb{R}^{336}\!\to\!\mathbb{R}^{H}$, because linear models are strong on these benchmarks \cite{zeng2023dlinear};
-(iii) models \emph{trained directly} at $H{=}720$ (Transformer and linear), the natural alternative to extrapolation;
-(iv) a single \emph{multi-horizon} model.
-
-\paragraph{Significance.}
-For each comparison we report how many of the 6 runs improve, which reflects variation between training runs.
-Within each run we also apply a Diebold--Mariano (DM) test \cite{diebold1995} to the per-origin loss difference over steps 97--720, with a Newey--West variance \cite{newey1987} at lag 719 to account for overlapping windows.
-
-% =====================================================================
 \section{Results}
-\label{sec:results}
-
-\subsection{At the training horizon the model is competitive, and the scales change little}
-\label{sec:inhorizon}
 \begin{table}[t]\centering\small
-\caption{Train and test MSE at the training horizon $H{=}96$ (mean$\pm$std over seeds). For reference, PatchTST/42 ($L{=}336$) reports Electricity 0.130, ETTh1 0.375, ETTm1 0.290, Weather 0.152 (\cite{nie2023patchtst}, Table 3).}
-\label{tab:in}
+\caption{Train and test MSE at the training horizon $H{=}96$ (mean$\pm$std over seeds). PatchTST/42 reports test 0.130, 0.375, 0.290, 0.152 on Electricity, ETTh1, ETTm1, Weather (\cite{nie2023patchtst}, Table 3).}
+\label{tab:in}\setlength{\tabcolsep}{4pt}
 \begin{tabular}{lcccccc}\toprule
-& \multicolumn{2}{c}{Linear} & \multicolumn{2}{c}{Transformer, fixed RoPE} & \multicolumn{2}{c}{Transformer, learnable scale}\\
+& \multicolumn{2}{c}{Linear} & \multicolumn{2}{c}{Transformer, fixed RoPE} & \multicolumn{2}{c}{Transformer, learnable}\\
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
 Dataset & train & test & train & test & train & test\\\midrule
 \inputtab tables/t1_inhorizon.tex
 \bottomrule\end{tabular}\end{table}
-Table~\ref{tab:in} shows that the backbone is close to published PatchTST results.
-It beats the linear model on Weather and EPF-NP, ties on Electricity, and loses on ETTh1, ETTm1 and exchange rates, in line with \cite{zeng2023dlinear}.
-At $H{=}96$, fixed and learnable RoPE differ by about one standard deviation across seeds or less, and the learned scales stay within about 10\% of 1.
-Weather's lower test than train error reflects a calmer test period; splits are strictly chronological.
-At the training horizon, therefore, nothing distinguishes the two models.
 
-\subsection{Beyond the training horizon, fixed RoPE degrades and learnable scales reduce it}
-\label{sec:extrap}
+\textbf{At the training horizon} (Table~\ref{tab:in}) the backbone is close to PatchTST; it beats the linear model on Weather and EPF-NP, ties on Electricity and loses on ETTh1, ETTm1 and exchange rates, as reported by \cite{zeng2023dlinear}. Fixed and learnable RoPE differ by about one seed standard deviation or less (Weather's test period is calmer than its training period).
+
 \begin{figure}[t]\centering
-\includegraphics{figures/fig1_perstep.pdf}
-\caption{Test MSE per forecast step for models trained at $H{=}96$ (base $10^4$, mean of 3 seeds). Fixed RoPE degrades soon after it leaves the training horizon.}
+\includegraphics[width=0.92\linewidth]{figures/fig1_perstep.pdf}
+\caption{Test MSE per forecast step, trained at $H{=}96$ (base $10^4$, 3 seeds).}
 \label{fig:perstep}\end{figure}
 \begin{table}[t]\centering\small
-\caption{Test MSE over steps 1--720. Columns 2--3: trained at $H{=}96$ and queried at 720. DM: of 6 runs (seed$\times$base), how many are significantly better\,/\,worse with learnable scales ($p{<}0.05$). Columns 5--7: one multi-horizon model, and models trained directly at 720.}
-\label{tab:ex}
+\caption{Test MSE over steps 1--720. Trained at 96 and queried at 720 (fixed vs learnable); DM: runs of 6 significantly better\,/\,worse with learnable scales ($p{<}0.05$); one multi-horizon model; models trained at 720.}
+\label{tab:ex}\setlength{\tabcolsep}{4pt}
 \begin{tabular}{lcccccc}\toprule
 & \multicolumn{2}{c}{Trained at 96} & DM & Multi-horizon & \multicolumn{2}{c}{Trained at 720}\\
 \cmidrule(lr){2-3}\cmidrule(lr){6-7}
 Dataset & fixed & learnable & +\,/\,$-$ & learnable & Transformer & Linear\\\midrule
 \inputtab tables/t2_extrap.tex
 \bottomrule\end{tabular}\end{table}
-Figure~\ref{fig:perstep} and Table~\ref{tab:ex} contain the central finding.
-Queried at 720 steps, fixed RoPE reaches 1.5--6.4 times the error of a Transformer trained at 720 on Electricity, ETTh1 and ETTm1.
-The degradation starts within a day or two after the training horizon and grows with the lead.
-Learnable scales reduce the 720-step error by 66\% on Electricity (1.347$\to$0.464), 51\% on ETTh1 (0.972$\to$0.473) and 38\% on ETTm1 (0.764$\to$0.474); all 6 runs improve on each dataset and every run's DM test is significant.
-On ETTh1 the extrapolating model also has lower error than both models trained directly at 720, which overfit this small dataset.
-On Weather and exchange rates the effect is small and of mixed sign, which Sec.~\ref{sec:mechanism} explains.
 
-\subsection{Mechanism: the learned scales align RoPE with the daily cycle}
-\label{sec:mechanism}
+\textbf{Beyond the training horizon} (Fig.~\ref{fig:perstep}, Table~\ref{tab:ex}) fixed RoPE degrades within a day or two and reaches 1.5--6.4 times the error of a Transformer trained at 720 on Electricity, ETTh1 and ETTm1.
+Learnable scales reduce the 720-step error by 66\% (Electricity), 51\% (ETTh1) and 38\% (ETTm1), significantly in all 6 runs each; on ETTh1 the extrapolating model even beats both models trained at 720, which overfit.
+On Weather and exchange rates the effect is small and of mixed sign.
+
 \begin{figure}[t]
-\begin{minipage}[t]{0.50\linewidth}\centering\small
-\captionof{table}{Mechanism ablations, all trained at $H{=}96$ (test MSE).}\label{tab:mech}
+\begin{minipage}[t]{0.49\linewidth}\centering\small
+\captionof{table}{Mechanism ablations (test MSE, trained at $H{=}96$).}\label{tab:mech}
+\setlength{\tabcolsep}{3pt}
 \begin{tabular}{@{}lc@{}}\toprule
 Frequency scales & Test MSE\\\midrule
 \inputtab tables/t3_mechanism.tex
 \bottomrule\end{tabular}
 \end{minipage}\hfill
-\begin{minipage}[t]{0.47\linewidth}\centering
+\begin{minipage}[t]{0.48\linewidth}\centering
 \vspace{0pt}\includegraphics[width=\linewidth]{figures/fig2_alignment.pdf}
-\captionof{figure}{ETTm1, 6 tokens per day: scale $2\pi/6=1.047$ aligns RoPE's fastest rotation with the day. Fixed at 1.047 without learning it matches the learned model; 5\% too slow or fast collapses like standard RoPE.}\label{fig:align}
+\captionof{figure}{ETTm1: scale $2\pi/6{=}1.047$ aligns the fastest rotation with the day; fixed at 1.047 it matches the learned model, 5\% off it fails.}\label{fig:align}
 \end{minipage}
 \end{figure}
 
-We test the explanation of Sec.~\ref{sec:method-phase} with five pieces of evidence.
-
-\paragraph{(1) Learning matters more than head diversity.}
-For extrapolation on ETTh1, one scale shared by all heads performs as well as one per head, while hand-set spreads of head scales help little (0.9--1.1) or hurt (0.5--2.0) (Table~\ref{tab:mech}).
-The gain does not require heads to specialise to time scales, contrary to our original proposal.
-
-\paragraph{(2) The effect sits in the fast frequencies.}
-In the grouped variant the fast group learns almost the same value as the per-head scale and gives the same error (Table~\ref{tab:mech}), while the slow group drifts (0.95--1.13) with no measurable effect on the forecast.
-This is consistent with Eq.~\eqref{eq:drift}: the slow pairs turn by at most 0.2 rad per day, so their codes barely change from one day to the next and cannot tell times of day apart.
-
-\paragraph{(3) The learned value is the aligning value, and it is necessary.}
-On ETTm1 the learned scales move from 1 towards $2\pi/6=1.047$ during training (mean 1.036 over 8 heads and 3 seeds; Fig.~\ref{fig:reset}a).
-Fixing the scale at 1.047 without learning gives the same gain (0.459 versus 0.488 learned), while 0.955 or 1.10 --- 5\% off --- are as bad as standard RoPE or worse (Fig.~\ref{fig:align}; 1.047 beats 0.955 in all 6 runs, DM $p<10^{-10}$).
-Conversely, taking the trained learnable model and resetting its scales to 1 at test time, with all other weights unchanged, brings the failure back (Fig.~\ref{fig:reset}b).
-On Weather, where one day is 9 tokens, the same intervention points the same way: fixing the aligned value $2\pi/9\approx0.698$ gives a 720-step error of 0.359 and 0.366 (bases $10^3$, $10^4$) against 0.392 and 0.377 for standard RoPE, while the half-day value $2\pi/4.5$ does not help (0.392, 0.386).
+\textbf{Mechanism.} Four results support the explanation of Sec.~2.
+\emph{(1) Head diversity is not needed:} one scale shared by all heads works as well as one per head, and hand-set spreads across heads help little or hurt (Table~\ref{tab:mech}) --- contrary to our original proposal.
+\emph{(2) The effect sits in the fast pairs:} grouped scaling equals per-head scaling; its slow group drifts (0.95--1.13) without effect, as slow pairs barely change from day to day.
+\emph{(3) The learned value is the aligning value, and it is necessary:} on ETTm1 the scales move from 1 towards 1.047 (mean 1.036, Fig.~\ref{fig:reset}a); fixing 1.047 without learning gives the same gain, 0.955 or 1.10 do not (Fig.~\ref{fig:align}; 1.047 beats 0.955 in all 6 runs, DM $p<10^{-10}$), and resetting a trained model's scales to 1 at test time brings the failure back (Fig.~\ref{fig:reset}b). On Weather (9 tokens per day) fixing $2\pi/9$ likewise lowers the 720-step error (0.359/0.366 vs 0.392/0.377 at bases $10^3/10^4$).
+\emph{(4) Attention moves where RoPE arithmetic predicts} (Fig.~\ref{fig:attn}): placeholders look up the same time of day; with fixed RoPE this share falls from 0.66 to 0.03 over 7.5 days while attention shifts to $+4$\,h and then $+8$\,h --- the offsets whose codes best match training lags, computed from the angles alone --- whereas with 1.047 it stays (0.49).
+Gains also grow with seasonality: in Weather only the three solar-radiation channels gain, and exchange rates, with no cycle, show none.
+On hourly data (1.5 tokens per day) gains are as large but the learned scales (1.0--1.07) are not the day-aligned value; which cycle is matched there remains open.
 
 \begin{figure}[t]\centering
-\includegraphics[width=\linewidth]{figures/fig7_scales_and_reset.pdf}
-\caption{ETTm1, base $10^4$. (a) The 24 learned per-head scales (8 heads $\times$ 3 seeds) during training; dashed: the day-aligned value $2\pi/6$. (b) Test MSE per step (6-hour moving average) of fixed RoPE, the learnable model, and the same learnable weights with every scale reset to 1 at test time.}
+\includegraphics[width=0.6\linewidth]{figures/fig7_scales_and_reset.pdf}
+\caption{ETTm1, base $10^4$. (a) Learned per-head scales during training (8 heads $\times$ 3 seeds); dashed: day-aligned $2\pi/6$. (b) Per-step test MSE (6-hour average) of fixed RoPE, the learnable model, and the same weights with scales reset to 1 at test time.}
 \label{fig:reset}\end{figure}
-
-\paragraph{(4) Attention moves to the hour that RoPE arithmetic predicts.}
-Figure~\ref{fig:attn} splits the attention of each placeholder by the time-of-day offset of the history patch it attends to.
-Within the training horizon all models attend mostly to the same time of day, a ``same time yesterday'' lookup.
-With fixed RoPE this share falls from 0.66 to 0.03 over 7.5 days, and the attention moves to $+4$\,h and then $+8$\,h --- exactly the offsets predicted in Sec.~\ref{sec:method-phase} from the RoPE angles alone (dashed lines), before any model was trained.
-With scale 0.955 the drift is faster, again as predicted.
-With 1.047 the attention stays on the same hour (0.49 after 7.5 days), and with the learned scales it decays slowly (0.38).
-Gradient clipping is not the cause: it is inactive after warm-up.
-
 \begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{figures/fig8_attention_offset.pdf}
-\caption{Where the placeholders look (ETTm1, trained at $H{=}96$, queried at 720; last layer, mean over heads and 3 seeds). Colour: share of attention on history patches at each time-of-day offset from the forecast step. Dashed: offset predicted from RoPE arithmetic alone --- the offset whose fastest-pair angle is closest to a lag seen in training (Fig.~\ref{fig:codes}).}
+\caption{Attention of placeholders by time-of-day offset of the attended history (ETTm1, queried at 720; last layer, 3 seeds). Dashed: offset predicted from RoPE angles alone.}
 \label{fig:attn}\end{figure}
 
-\paragraph{(5) Gains are larger on more seasonal series.}
-Across channels the error ratio fixed/learnable rises with daily seasonal strength (Fig.~\ref{fig:season}): on ETTm1 the ratio reaches 1.8 on the two most seasonal load channels, and in Weather only the three solar-radiation channels gain (ratio 1.14--1.17), which explains why Weather as a whole shows no gain.
-Across datasets the relation is clear at the extremes (Electricity largest, exchange rates none) but loose in between (EPF-PJM gains more than its seasonal strength suggests), so seasonal strength indicates where to expect a gain but does not predict its size.
+\textbf{Multi-horizon training} closes most of the remaining gap: one model is within 3\% of, or better than, the Transformer trained at 720 on all seven datasets (Table~\ref{tab:ex}), at a small cost at $H{=}96$ (Electricity 0.135 vs 0.128). It is the stronger remedy when 720-step targets exist; learnable scales help when they do not or when long-horizon training overfits (ETTh1, EPF-NP).
 
-\begin{figure}[t]\centering
-\includegraphics{figures/fig3_periodicity.pdf}
-\caption{Gain from learnable scales (MSE ratio fixed/learnable on steps 97--720; $>1$ means learnable is better) against daily seasonal strength. (a) Datasets; orange: financial markets. (b) Individual channels of Weather and ETTm1.}
-\label{fig:season}\end{figure}
-
-\subsection{Multi-horizon training}
-\label{sec:multi}
-Learnable scales do not close the whole gap: on Electricity, ETTm1 and Weather the extrapolating model stays above models trained at 720 (Table~\ref{tab:ex}).
-A single model trained on mixed horizons is within 3\% of, or better than, the Transformer trained at 720 on all seven datasets, at a small cost at $H{=}96$ (Electricity 0.135 versus 0.128 on the same windows).
-With multi-horizon training, fixed and learnable RoPE perform alike, presumably because distant positions are then seen in training.
-Multi-horizon training is the stronger remedy when long training targets are available; learnable scales help when they are not, or when long-horizon training overfits, as on ETTh1 (0.473 extrapolated versus 0.541 multi-horizon and 0.632 trained at 720) and EPF-NP (0.896 versus 1.123 and 1.196).
-
-% =====================================================================
 \section{Application to finance}
-\label{sec:finance}
-The mechanism gives a concrete rule for financial forecasting: \emph{when a model is used beyond its training horizon, its position encoding must be commensurate with the calendar cycle of the series, and learnable RoPE scales can find this alignment.}
-We tested this on financial series chosen in advance.
+Electricity prices are traded with a strong daily profile; learnable scales cut 720-step error on both markets (EPF-PJM 0.443$\to$0.273, significant in 6/6 runs; EPF-NP 1.072$\to$0.896, 5/6).
+Exchange rates behave like a random walk: the scales have no consistent effect (3 runs better, 3 worse) and the linear model is best.
+Practical rules: (i) for seasonal series --- intraday volume and volatility with their daily U-shape, power and gas prices --- use learnable or calendar-aligned RoPE ($\hat\omega_0=2\pi/T$ for the tokenisation used) before forecasting beyond the training horizon; (ii) to serve several risk horizons (1- and 10-day VaR, HAR-style volatility) with one model, train on mixed horizons; (iii) for near-random-walk prices, position encodings did not help.
 
-\paragraph{Electricity prices.}
-Day-ahead prices are traded with a strong daily profile \cite{weron2014}.
-Learnable scales reduce the 720-step error on both markets: EPF-PJM from 0.443 to 0.273 (significant in 6 of 6 runs) and EPF-NP from 1.072 to 0.896 (5 of 6).
-On EPF-NP the extrapolating model is also better than the multi-horizon model and the Transformer trained at 720, which overfit the noisy price series; a linear model trained at 720 remains best (0.863).
+\section{Limitations and conclusion}
+Heads did not specialise to time scales and grouping gave no gain; the model is small (2 layers, $d{=}64$), seeds are few (3--5, partly offset by DM tests), and mechanism analyses cover ETTh1, ETTm1 and Weather.
+RoPE degrades beyond the training horizon because its rotation is out of step with the daily cycle; four learnable scales per layer realign it, and mixed-horizon training narrows the rest. A position encoding is a clock, and it must keep the market's time.
 
-\paragraph{Exchange rates.}
-Daily exchange rates behave like a random walk \cite{meese1983}, so there is no cycle to align.
-As predicted, the scales have no consistent effect (3 runs significantly better, 3 worse), the linear model is best at every horizon, and per-window normalisation is essential.
-
-\paragraph{Practical guidance.}
-(i) For seasonal financial series --- intraday volume and volatility with their daily U-shape \cite{andersen1997}, power and gas prices --- use learnable or calendar-aligned RoPE before forecasting beyond the training horizon, and check the aligned value $2\pi/T$ for the tokenisation used.
-(ii) To cover several risk horizons with one model (1- and 10-day VaR, daily-to-monthly volatility as in HAR), train on mixed horizons when long targets exist.
-(iii) For near-random-walk prices we saw no benefit from position encodings, and simple linear models remain the reference.
-
-% =====================================================================
-\section{Discussion and limitations}
-\label{sec:discussion}
-
-\paragraph{What we learned about the proposal.}
-Our original hypothesis --- heads specialising to distinct time scales, and groups of frequencies scaled separately --- was not supported: shared scales work as well as per-head scales, and grouping adds nothing.
-What the scales do is a single, specific correction to the fastest rotation, which matters only when the model must reuse its notion of ``time of day'' at positions it has not seen.
-
-\paragraph{Scope of the mechanism.}
-The mechanism is cleanest when one day spans a whole number of tokens: ETTm1 (6 tokens) and Weather (9 tokens), where the aligned value can be fixed by hand and the attention prediction checked.
-On hourly data with patches of 16, one day is 1.5 tokens; the learned scales there (about 1.0--1.07, Table~\ref{tab:scales}) are far from the values that align the fastest pair with the day (4.19 for one turn per day, 2.09 for one turn per two days), although the gains are as large.
-Which alignment the model finds on these datasets --- for example with the weekly cycle, or with the sub-patch phase --- is an open question; patch lengths that divide the day would make the alignment exact.
-
-\paragraph{Limitations.}
-The model is small (2 layers, $d{=}64$) and seeds are few (3--5), partly offset by per-run DM tests.
-The mechanism analyses (fixed scales, attention, channels) cover ETTh1, ETTm1 and Weather.
-With point tokens instead of patches the extrapolation effect is much noisier.
-Linear models stay strong at the training horizon, and we make no claim of state-of-the-art accuracy.
-
-\paragraph{Future work.}
-Initialising RoPE frequencies from the dominant period of the data instead of learning them; aligning several frequencies to several cycles (day and week); and testing time-series foundation models that use RoPE, which are routinely queried at horizons other than those they were trained on.
-
-% =====================================================================
-\section{Conclusion}
-A Transformer forecaster that represents the future by placeholder tokens can be queried at any horizon, but with standard RoPE it degrades sharply beyond the horizon it was trained on --- up to 6.4 times the error of a model trained for the longer horizon, with no warning at the training horizon.
-We traced this to phase drift: RoPE's fastest rotation is out of step with the daily cycle, so far-ahead positions carry the code of the wrong hour, and the model's attention moves to exactly that hour.
-Four learnable frequency scales per layer learn to realign the rotation and reduce the extrapolation error by 38--66\% on seasonal benchmarks and by 16--38\% on electricity markets, while multi-horizon training closes most of the remaining gap when long training targets exist.
-For financial forecasting the lesson is simple: a position encoding is a clock, and it must keep the same time as the market.
-
-% =====================================================================
-\begingroup\small
-\begin{thebibliography}{99}\setlength{\itemsep}{1pt}
-\bibitem{andersen1997} T.~G. Andersen, T. Bollerslev. Intraday periodicity and volatility persistence in financial markets. \emph{Journal of Empirical Finance}, 4(2--3):115--158, 1997.
-\bibitem{barbero2025rope} F. Barbero, A. Vitvitskyi, C. Perivolaropoulos, R. Pascanu, P. Veli\v{c}kovi\'c. Round and round we go! What makes rotary positional encodings useful? \emph{ICLR}, 2025.
-\bibitem{chen2023pi} S. Chen, S. Wong, L. Chen, Y. Tian. Extending context window of large language models via positional interpolation. arXiv:2306.15595, 2023.
-\bibitem{corsi2009} F. Corsi. A simple approximate long-memory model of realized volatility. \emph{Journal of Financial Econometrics}, 7(2):174--196, 2009.
-\bibitem{diebold1995} F.~X. Diebold, R.~S. Mariano. Comparing predictive accuracy. \emph{Journal of Business \& Economic Statistics}, 13(3):253--263, 1995.
-\bibitem{ghysels2006} E. Ghysels, P. Santa-Clara, R. Valkanov. Predicting volatility: getting the most out of return data sampled at different frequencies. \emph{Journal of Econometrics}, 131(1--2):59--95, 2006.
-\bibitem{kim2022revin} T. Kim, J. Kim, Y. Tae, C. Park, J.-H. Choi, J. Choo. Reversible instance normalization for accurate time-series forecasting against distribution shift. \emph{ICLR}, 2022.
-\bibitem{lago2021} J. Lago, G. Marcjasz, B. De Schutter, R. Weron. Forecasting day-ahead electricity prices: a review of state-of-the-art algorithms, best practices and an open-access benchmark. \emph{Applied Energy}, 293:116983, 2021.
-\bibitem{liu2024itransformer} Y. Liu, T. Hu, H. Zhang, H. Wu, S. Wang, L. Ma, M. Long. iTransformer: inverted Transformers are effective for time series forecasting. \emph{ICLR}, 2024.
-\bibitem{meese1983} R.~A. Meese, K. Rogoff. Empirical exchange rate models of the seventies: do they fit out of sample? \emph{Journal of International Economics}, 14(1--2):3--24, 1983.
-\bibitem{newey1987} W.~K. Newey, K.~D. West. A simple, positive semi-definite, heteroskedasticity and autocorrelation consistent covariance matrix. \emph{Econometrica}, 55(3):703--708, 1987.
-\bibitem{nie2023patchtst} Y. Nie, N.~H. Nguyen, P. Sinthong, J. Kalagnanam. A time series is worth 64 words: long-term forecasting with Transformers. \emph{ICLR}, 2023.
-\bibitem{peng2024yarn} B. Peng, J. Quesnelle, H. Fan, E. Shippole. YaRN: efficient context window extension of large language models. \emph{ICLR}, 2024.
-\bibitem{press2022alibi} O. Press, N.~A. Smith, M. Lewis. Train short, test long: attention with linear biases enables input length extrapolation. \emph{ICLR}, 2022.
-\bibitem{su2021roformer} J. Su, Y. Lu, S. Pan, A. Murtadha, B. Wen, Y. Liu. RoFormer: enhanced Transformer with rotary position embedding. arXiv:2104.09864, 2021.
-\bibitem{taieb2012} S. Ben Taieb, G. Bontempi, A.~F. Atiya, A. Sorjamaa. A review and comparison of strategies for multi-step ahead time series forecasting based on the NN5 forecasting competition. \emph{Expert Systems with Applications}, 39(8):7067--7083, 2012.
-\bibitem{vaswani2017} A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A.~N. Gomez, \L. Kaiser, I. Polosukhin. Attention is all you need. \emph{NeurIPS}, 2017.
-\bibitem{wang2006} X. Wang, K. Smith, R. Hyndman. Characteristic-based clustering for time series data. \emph{Data Mining and Knowledge Discovery}, 13(3):335--364, 2006.
-\bibitem{weron2014} R. Weron. Electricity price forecasting: a review of the state-of-the-art with a look into the future. \emph{International Journal of Forecasting}, 30(4):1030--1081, 2014.
-\bibitem{wu2021autoformer} H. Wu, J. Xu, J. Wang, M. Long. Autoformer: decomposition Transformers with auto-correlation for long-term series forecasting. \emph{NeurIPS}, 2021.
-\bibitem{wu2023timesnet} H. Wu, T. Hu, Y. Liu, H. Zhou, J. Wang, M. Long. TimesNet: temporal 2D-variation modeling for general time series analysis. \emph{ICLR}, 2023.
+\begingroup\footnotesize
+\begin{thebibliography}{99}\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}
+\bibitem{corsi2009} F. Corsi. A simple approximate long-memory model of realized volatility. \emph{J. Financial Econometrics}, 2009.
+\bibitem{diebold1995} F.~X. Diebold, R.~S. Mariano. Comparing predictive accuracy. \emph{J. Business \& Economic Statistics}, 1995.
+\bibitem{lago2021} J. Lago, G. Marcjasz, B. De Schutter, R. Weron. Forecasting day-ahead electricity prices: a review of state-of-the-art algorithms, best practices and an open-access benchmark. \emph{Applied Energy}, 2021.
+\bibitem{meese1983} R.~A. Meese, K. Rogoff. Empirical exchange rate models of the seventies. \emph{J. International Economics}, 1983.
+\bibitem{nie2023patchtst} Y. Nie et al. A time series is worth 64 words: long-term forecasting with Transformers. \emph{ICLR}, 2023.
+\bibitem{peng2024yarn} B. Peng et al. YaRN: efficient context window extension of large language models. \emph{ICLR}, 2024.
+\bibitem{su2021roformer} J. Su et al. RoFormer: enhanced Transformer with rotary position embedding. arXiv:2104.09864, 2021.
+\bibitem{weron2014} R. Weron. Electricity price forecasting: a review of the state-of-the-art. \emph{Int. J. Forecasting}, 2014.
 \bibitem{zeng2023dlinear} A. Zeng, M. Chen, L. Zhang, Q. Xu. Are Transformers effective for time series forecasting? \emph{AAAI}, 2023.
-\bibitem{zhou2021informer} H. Zhou, S. Zhang, J. Peng, S. Zhang, J. Li, H. Xiong, W. Zhang. Informer: beyond efficient Transformer for long sequence time-series forecasting. \emph{AAAI}, 2021.
-\bibitem{zhou2022fedformer} T. Zhou, Z. Ma, Q. Wen, X. Wang, L. Sun, R. Jin. FEDformer: frequency enhanced decomposed Transformer for long-term series forecasting. \emph{ICML}, 2022.
+\bibitem{zhou2021informer} H. Zhou et al. Informer: beyond efficient Transformer for long sequence time-series forecasting. \emph{AAAI}, 2021.
 \end{thebibliography}
 \endgroup
 
-% =====================================================================
+% ===================================================================== appendix (not counted)
 \clearpage
-\appendix
-\renewcommand{\thesection}{\Alph{section}}
-\section{Replication}
-\label{app:repro}
+\appendix\small
+\section*{Appendix A. Step-by-step replication}
 All runs used Python 3.13 and PyTorch 2.6 (CUDA 12.4) on one NVIDIA H100 (memory capped at 8\%); a run takes 20\,s--3\,min.
 Code: \url{https://github.com/ycsama0703/ft5011-ropeformer}, branch \texttt{final-horizon-extrapolation}.
-\textbf{Trained models and all result files} (257 checkpoints, 71\,MB) are attached to the release \url{https://github.com/ycsama0703/ft5011-ropeformer/releases/tag/final-report-2026-11-10}; unzipped at the repository root, they reproduce every table and figure without retraining.
+\textbf{Trained models and all result files} (257 checkpoints, 71\,MB) are attached to the release \url{https://github.com/ycsama0703/ft5011-ropeformer/releases/tag/final-report-2026-11-10}; unzipped at the repository root they reproduce every table and figure without retraining.
 
 \begin{table}[H]\centering\small
-\caption{Hyper-parameters, identical for every RoPE variant.}
+\caption{Hyper-parameters (identical for every RoPE variant) and datasets.}
 \label{tab:hyper}
-\begin{tabular}{ll@{\qquad}ll}\toprule
-Lookback $L$ & 336 steps (21 patches) & Optimiser & AdamW, lr $10^{-3}$, wd 0.01\\
-Patch length $P$ & 16 & RoPE scales & no weight decay, same lr\\
-Model width $d$ & 64 & Schedule & 300 warm-up steps, cosine decay\\
-Heads / layers & 4 / 2 & Gradient clipping & 1.0\\
-Feed-forward width & 128 & Batch size & 256\\
-Dropout & 0.1 & Precision & bf16 autocast\\
-RoPE base $b$ & $10^3$ or $10^4$ (validation) & Training horizon & 96 (6 placeholders)\\
-Coordinate pairs $m$ & 8 per head & Step budget & 2000 (ETTh1, EPF, exchange)\\
-&&& 4000 (ETTm1), 6000 (Weather)\\
-&&& 8000 (Electricity)\\\bottomrule
-\end{tabular}
+\resizebox{\linewidth}{!}{\begin{tabular}{ll@{\qquad}ll}\toprule
+Lookback / patch & 336 steps / 16 (21 tokens) & Optimiser & AdamW, lr $10^{-3}$, wd 0.01\\
+Width / heads / layers & 64 / 4 / 2 & RoPE scales & no weight decay\\
+Feed-forward / dropout & 128 / 0.1 & Schedule & 300 warm-up steps, cosine\\
+RoPE base & $10^3$ or $10^4$ (validation) & Clip / batch / precision & 1.0 / 256 / bf16\\
+Training horizon & 96 (6 placeholders) & Step budget & 2000 ETTh1, EPF, exchange;\\
+Evaluation horizon & 720 (45 placeholders) && 4000 ETTm1; 6000 Weather; 8000 Electricity\\\bottomrule
+\end{tabular}}\\[6pt]
+\resizebox{\linewidth}{!}{\begin{tabular}{lllrrl}\toprule
+Dataset & Source & Freq. & Length & Series & Split\\\midrule
+Electricity & Time-Series-Library & hourly & 26{,}304 & 321 & 70/10/20\\
+ETTh1 / ETTm1 & Time-Series-Library & hourly / 15 min & 17{,}420 / 69{,}680 & 7 & 12/4/4 months\\
+Weather & Time-Series-Library & 10 min & 52{,}696 & 21 & 70/10/20\\
+EPF-NP / EPF-PJM & Lago et al.\ (2021), price only & hourly & 52{,}416 & 1 & 70/10/20\\
+Exchange rates & Time-Series-Library & daily & 7{,}588 & 8 & 70/10/20, RevIN\\\bottomrule
+\end{tabular}}
 \end{table}
 
-\paragraph{Commands.}
 {\raggedright
 \begin{enumerate}
 \item \texttt{pip install -e .}; \texttt{python -m unittest discover -s tests}.
-\item Data: \texttt{python tools/download\_data.py ETTh1 ETTm1 weather electricity exchange\_rate}; financial data: \texttt{python experiments/build\_fin.py raw data} after downloading EPF (Appendix~\ref{app:data}).
-\item Train at 96 and extrapolate, with direct-training references, for dataset \texttt{D} and step budget \texttt{S}:\\
-\texttt{python tools/extrap\_study.py --dataset D --steps S --patch-len 16 --amp bf16 --seeds 0 1 2 --bases 1000 10000 --modes standard head grouped --eval-horizons 192 336 720 --direct-horizons 336 720 --direct-modes head --out results/r2\_D.json} (add \texttt{--instance-norm} for exchange rates).
+\item Data: \texttt{python tools/download\_data.py ETTh1 ETTm1 weather electricity exchange\_rate}; financial data: \texttt{python experiments/build\_fin.py raw data} after downloading EPF (Appendix B).
+\item Train at 96 and extrapolate, with direct-training references, for dataset \texttt{D} and step budget \texttt{S}: \texttt{python tools/extrap\_study.py --dataset D --steps S --patch-len 16 --amp bf16 --seeds 0 1 2 --bases 1000 10000 --modes standard head grouped --eval-horizons 192 336 720 --direct-horizons 336 720 --direct-modes head --out results/r2\_D.json} (add \texttt{--instance-norm} for exchange rates).
 \item Multi-horizon: \texttt{python tools/multi\_horizon.py --dataset D --steps S --train-horizons 96 192 336 720 --test-horizon 720 --out results/mh\_D.json}.
-\item Ablations (Table~\ref{tab:mech}): \texttt{extrap\_study.py} with \texttt{--modes shared\_group fixed\_head:0.9,0.97,1.03,1.1 fixed\_head:0.5,0.8,1.25,2.0} (ETTh1, 5 seeds) and \texttt{fixed\_head:1.0472,1.0472,1.0472,1.0472} etc.\ (ETTm1).
+\item Ablations (Table~\ref{tab:mech}): \texttt{extrap\_study.py} with \texttt{--modes shared\_group fixed\_head:0.9,0.97,1.03,1.1 fixed\_head:0.5,0.8,1.25,2.0} (ETTh1, 5 seeds) and \texttt{fixed\_head:1.0472,1.0472,1.0472,1.0472} etc.\ (ETTm1, Weather with 0.6981).
 \item Train/val/test MSE, linear reference, DM tests, per-channel analysis and seasonal strength: \texttt{experiments/} (\texttt{train\_eval.py}, \texttt{linear96.py}, \texttt{dm\_test.py}, \texttt{per\_channel.py}, \texttt{periodicity.py}; commands in \texttt{experiments/README.md}).
-\item Figures: \texttt{python report/make\_assets.py results} (Figs.~\ref{fig:perstep}, \ref{fig:align}, \ref{fig:season}, Tables~\ref{tab:in}--\ref{tab:mech}); \texttt{python report/phase\_figures.py} (Figs.~\ref{fig:phase}, \ref{fig:codes}); \texttt{python report/mechanism\_figures.py --results results --data-dir data} (Figs.~\ref{fig:reset}, \ref{fig:attn}; about 10\,s on CPU).
+\item Tables and figures: \texttt{python report/make\_assets.py results}; attention and scale figures from the released checkpoints (about 10\,s on CPU): \texttt{python report/mechanism\_figures.py --results results --data-dir data}; phase arithmetic: \texttt{python report/phase\_figures.py}.
 \end{enumerate}}
 
-\section{Additional results}
-\label{app:more}
-
-\begin{table}[H]\centering\small
-\caption{Learned per-head scales $e^{a}$ at the end of training (base $10^4$; mean and range over 2 layers $\times$ 4 heads $\times$ 3 seeds), with the number of tokens per day.}
-\label{tab:scales}
-\begin{tabular}{lccc}\toprule
-Dataset & Tokens/day & Learned scale, mean & Range\\\midrule
-Electricity & 1.5 & 1.070 & 1.04--1.18\\
-ETTh1 & 1.5 & 1.026 & 0.92--1.06\\
-ETTm1 & 6 & 1.036 & 0.99--1.09\\
-Weather & 9 & 0.983 & 0.75--1.08\\
-EPF-NP & 1.5 & 0.991 & 0.87--1.07\\
-EPF-PJM & 1.5 & 0.990 & 0.89--1.06\\
-Exchange rates & --- & 0.990 & 0.86--1.05\\\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{figure}[H]\centering
-\includegraphics[width=\linewidth]{figures/fig6_code_similarity.pdf}
-\caption{Which training lag a test-time lag resembles (ETTm1; fastest pair only; pure arithmetic). (a,b) Cosine similarity between the rotation of each lag used at $H{=}720$ and each lag seen in training; the dashed line marks the largest training lag, orange dots mark best matches at the wrong time of day. (c) Time-of-day error of the best match: with standard RoPE, lags beyond 4.5 days resemble a patch 4\,h and later 8\,h away; aligned and learned scales make no error. These offsets are the dashed lines of Fig.~\ref{fig:attn}.}
-\label{fig:codes}\end{figure}
-
-\section{Data sources}
-\label{app:data}
+\section*{Appendix B. Data sources}
 \begin{itemize}
 \item ETTh1, ETTm1, Weather, Electricity, exchange rates: Time-Series-Library collection (CC BY 4.0), \url{https://huggingface.co/datasets/thuml/Time-Series-Library}.
-\item EPF day-ahead prices (Nord Pool, PJM; hourly 2013--2018) \cite{lago2021}: \url{https://zenodo.org/records/4624805} (files \texttt{NP.csv}, \texttt{PJM.csv}); we keep the price column only.
+\item EPF day-ahead prices (Nord Pool, PJM; hourly 2013--2018): \url{https://zenodo.org/records/4624805} (files \texttt{NP.csv}, \texttt{PJM.csv}); we keep the price column only.
 \end{itemize}
 \end{document}
