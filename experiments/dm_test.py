@@ -20,7 +20,7 @@ p.add_argument("--horizon", type=int, default=720); p.add_argument("--from-step"
 p.add_argument("--instance-norm", action="store_true"); p.add_argument("--out", required=True)
 a = p.parse_args()
 args = argparse.Namespace(instance_norm=a.instance_norm, amp="bf16", eval_chunk=1024)
-dev = torch.device("cuda")
+dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 data = WindowedSeries.from_csv(f"data/{a.dataset}.csv", a.dataset, 336).to(dev)
 test = data.samples("test", a.horizon)
 origins = torch.unique(test[:, 0])

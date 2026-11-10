@@ -12,6 +12,11 @@ and unzip it at the repository root. It contains every result file (`results/*.j
 used in the report (`results/ckpt*/`, described in `results/RESULTS_README.md`). With it, step 4 below and
 `python report/make_assets.py results` run without training anything.
 
+**Expected variation when retraining.** GPU kernels are not deterministic, so single runs differ slightly
+between machines. Retraining ETTh1 (step 1, 3 seeds x 2 bases) on an RTX 3090 gave a 720-step MSE of 0.982 (fixed RoPE)
+and 0.463 (learnable) against 0.987 and 0.472 in the report (single runs within 3%). Re-evaluating the released
+checkpoints reproduces the reported numbers to within 0.01%, also on CPU.
+
 ## 0. Setup and data
 ```bash
 pip install -e .

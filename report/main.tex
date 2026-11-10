@@ -210,7 +210,7 @@ RoPE degrades beyond the training horizon because its rotation is out of step wi
 \section*{Appendix A. Step-by-step replication}
 All runs used Python 3.13 and PyTorch 2.6 (CUDA 12.4) on one NVIDIA H100 (memory capped at 8\%); a run takes 20\,s--3\,min.
 Code: \url{https://github.com/ycsama0703/ft5011-ropeformer}, branch \texttt{final-horizon-extrapolation}.
-\textbf{Trained models and all result files} (257 checkpoints, 71\,MB) are attached to the release \url{https://github.com/ycsama0703/ft5011-ropeformer/releases/tag/final-report-2026-11-10}; unzipped at the repository root they reproduce every table and figure without retraining.
+\textbf{Trained models and all result files} (257 checkpoints, 71\,MB) are attached to the release \url{https://github.com/ycsama0703/ft5011-ropeformer/releases/tag/final-report-2026-11-10}; unzipped at the repository root they reproduce every table and figure without retraining. Retraining ETTh1 from scratch on a different GPU (RTX 3090, 12 runs) gave a 720-step MSE of 0.982 (fixed) and 0.463 (learnable) against 0.987 and 0.472 in the report; single runs differ by up to 3\% because GPU kernels are not deterministic.
 
 \begin{table}[H]\centering\small
 \caption{Hyper-parameters (identical for every RoPE variant) and datasets.}

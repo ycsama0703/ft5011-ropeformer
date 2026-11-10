@@ -1,2 +1,4 @@
 # Python >= 3.10
 torch>=2.0
+numpy
+matplotlib  # report figures (report/*.py)

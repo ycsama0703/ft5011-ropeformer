@@ -71,7 +71,7 @@ LIN96 = {"ETTh1": "lin96_ETTh1", "ETTm1": "lin96_ETTm1", "weather": "lin96_weath
          "epf_np": "lin96_epf_np", "epf_pjm": "lin96_epf_pjm", "exchange_rate_norm": "lin96_exchange_rate_norm"}
 DM = {"ETTh1": "dm_ETTh1", "ETTm1": "dm_ETTm1", "weather": "dm_weather", "electricity": "dm_electricity",
       "epf_np": "dm_epf_np", "epf_pjm": "dm_epf_pjm", "exchange_rate_norm": "dm_exchange_rate_norm"}
-ORDER = ["electricity", "ETTh1", "ETTm1", "weather", "epf_np", "epf_pjm", "exchange_rate_norm", "btc_hourly"]
+ORDER = ["electricity", "ETTh1", "ETTm1", "weather", "epf_np", "epf_pjm", "exchange_rate_norm"]  # BTC results are in the release but not in the report
 
 
 def extrap(study, model, H=720, lo=0):

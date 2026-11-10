@@ -13,7 +13,7 @@ p.add_argument("--instance-norm", action="store_true"); p.add_argument("--out", 
 a = p.parse_args()
 args = argparse.Namespace(instance_norm=a.instance_norm, amp="none", eval_chunk=4096, horizon=96, lr=1e-3, scale_lr=None,
                           warmup_steps=300, steps=a.steps, weight_decay=0.01, batch_size=256, eval_every=a.eval_every)
-dev = torch.device("cuda")
+dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 data = WindowedSeries.from_csv(f"data/{a.dataset}.csv", a.dataset, 336).to(dev)
 tr, va, te = data.samples("train", 96), data.samples("val", 96), data.samples("test", 96)
 if va.shape[0] > 32768:

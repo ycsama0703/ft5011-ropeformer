@@ -12,7 +12,7 @@ p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2]); p.add_argumen
 p.add_argument("--horizon", type=int, default=720); p.add_argument("--json", default=None)
 a = p.parse_args()
 args = argparse.Namespace(instance_norm=False, amp="bf16", eval_chunk=1024)
-dev = torch.device("cuda")
+dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 names, raw = load_csv(f"data/{a.dataset}.csv")
 x = raw[:split_borders(a.dataset, raw.shape[0], 336)["train"][2]]
 def acf(x, k):
