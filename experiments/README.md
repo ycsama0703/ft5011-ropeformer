@@ -1,6 +1,6 @@
 # Horizon-extrapolation experiments (FT5011 final report)
 
-Run everything from the repository root. Scripts in `experiments/` expect a CUDA GPU; `capped.py` is an optional
+Run everything from the repository root. Scripts use a CUDA GPU when available and otherwise the CPU (training on CPU is slow); `capped.py` is an optional
 wrapper that limits the process to 8% of GPU memory on a shared machine (`python experiments/capped.py <script> <args>`).
 All results land in `results/` (Git-ignored). Python 3.10+, PyTorch >= 2.0.
 
@@ -22,12 +22,10 @@ checkpoints reproduces the reported numbers to within 0.01%, also on CPU.
 pip install -e .
 python -m unittest discover -s tests        # 29 tests
 python tools/download_data.py ETTh1 ETTm1 weather electricity exchange_rate
-# financial data (EPF prices, Bitcoin): download into raw/, then build CSVs into data/
-mkdir -p raw/epf raw/btc
+# financial data (EPF day-ahead prices): download into raw/, then build CSVs into data/
+mkdir -p raw/epf
 curl -L -o raw/epf/NP.csv  "https://zenodo.org/records/4624805/files/NP.csv?download=1"
 curl -L -o raw/epf/PJM.csv "https://zenodo.org/records/4624805/files/PJM.csv?download=1"
-for y in 2019 2020 2021 2022 2023 2024; do for m in 01 02 03 04 05 06 07 08 09 10 11 12; do
-  curl -sSf -o raw/btc/b.zip https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-$y-$m.zip && unzip -o -q raw/btc/b.zip -d raw/btc; done; done
 python -I experiments/build_fin.py raw data
 ```
 
@@ -66,6 +64,9 @@ python tools/extrap_study.py --dataset ETTh1 --steps 2000 --eval-every 200 --pat
 python tools/extrap_study.py --dataset ETTm1 --steps 4000 --eval-every 250 $C --eval-horizons 192 336 720 \
   --modes fixed_head:1.0472,1.0472,1.0472,1.0472 fixed_head:0.955,0.955,0.955,0.955 fixed_head:1.10,1.10,1.10,1.10 \
   --ckpt-dir results/ckpt_r3 --out results/r3_ETTm1_align.json
+# Weather (9 tokens per day): day-aligned 2*pi/9 and half-day 2*pi/4.5
+python tools/extrap_study.py --dataset weather --steps 6000 --eval-every 500 $C --eval-horizons 192 336 720 \
+  --modes fixed_head:0.6981,0.6981,0.6981,0.6981 fixed_head:1.3963,1.3963,1.3963,1.3963 --out results/r3_weather_align.json
 ```
 
 ## 4. Analysis (Table 1, Fig. 3, significance)
@@ -82,3 +83,9 @@ python report/make_assets.py results       # writes report/figures and report/ta
 ```
 Checkpoint directories: `results/ckpt` (ETTh1 ablations, ETTm1, weather, electricity), `results/ckpt_mh` (ETTh1, 720),
 `results/ckpt_fin` (EPF), `results/ckpt_fxn` (exchange, RevIN), `results/ckpt_r3` (alignment).
+
+## 5. Mechanism figures of the report (Figs. 4-5; no training, CPU is enough)
+```bash
+python report/phase_figures.py                                        # RoPE phase arithmetic (no model)
+python report/mechanism_figures.py --results results --data-dir data  # scale trajectories, scale reset, attention offsets
+```

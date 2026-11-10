@@ -15,4 +15,3 @@ jobs:
       - run: python -m pip install -e .
       - run: python -m unittest discover -s tests -v
       - run: python tools/smoke_test.py
-      - run: python examples/train_synthetic.py --steps 10

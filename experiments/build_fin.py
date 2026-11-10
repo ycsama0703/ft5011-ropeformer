@@ -26,14 +26,17 @@ for r in rows:
     dedup[r[0]] = r
 rows = [dedup[k] for k in sorted(dedup)]
 gaps = sum(1 for a, b in zip(rows, rows[1:]) if b[0] - a[0] != 3_600_000)
-with open(out / "btc_hourly.csv", "w", newline="") as fh:
+if not rows:
+    print("btc_hourly.csv: skipped (no raw/btc files; Bitcoin is not used in the report)")
+else:
+  with open(out / "btc_hourly.csv", "w", newline="") as fh:
     w = csv.writer(fh)
     w.writerow(["date", "log_volume", "log_trades", "abs_ret"])
     for prev, cur in zip(rows, rows[1:]):
         d = datetime.fromtimestamp(cur[0] / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         w.writerow([d, f"{math.log(cur[2] + 1e-9):.6f}", f"{math.log(cur[3] + 1):.6f}",
                     f"{abs(math.log(cur[1] / prev[1])):.8f}"])
-print(f"btc_hourly.csv: {len(rows) - 1} rows, {gaps} gaps (non-1h steps)")
+  print(f"btc_hourly.csv: {len(rows) - 1} rows, {gaps} gaps (non-1h steps)")
 
 for name in ("NP", "PJM"):
     with open(raw / "epf" / f"{name}.csv") as fh, open(out / f"epf_{name.lower()}.csv", "w", newline="") as g:
