@@ -68,7 +68,7 @@ The RoPE base and the best checkpoint are chosen on the validation set only; the
 \section{Results}
 \subsection{At the training horizon the model is competitive, and the scales change little}
 \begin{table}[h]\centering\small
-\caption{Train and test MSE at the training horizon $H{=}96$ (mean$\pm$std over seeds). For reference, PatchTST/42 ($L{=}336$) reports Electricity 0.130, ETTh1 0.375, ETTm1 0.290, Weather 0.152 \cite{nie2023patchtst}.}
+\caption{Train and test MSE at the training horizon $H{=}96$ (mean$\pm$std over seeds). For reference, PatchTST/42 ($L{=}336$) reports Electricity 0.130, ETTh1 0.375, ETTm1 0.290, Weather 0.152 (\cite{nie2023patchtst}, Table 3).}
 \label{tab:in}
 \begin{tabular}{lcccccc}\toprule
 & \multicolumn{2}{c}{Linear} & \multicolumn{2}{c}{Transformer, fixed RoPE} & \multicolumn{2}{c}{Transformer, learnable scale}\\
