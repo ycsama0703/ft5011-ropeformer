@@ -115,7 +115,7 @@ Train once on a short horizon, then forecast \textbf{any} horizon:
 {\scriptsize error at 720 steps vs.\ a model trained for 720 (Electricity)}
 \end{columns}
 \vspace{0.15cm}
-\begin{block}{Our explanation (evidence on pages 12, 18--19)}
+\begin{block}{Our explanation (evidence on pages 12, 18--21)}
 RoPE's \textbf{fixed periods} do not match the \textbf{daily cycle}: each day the same hour gets a slightly different position code, so far ahead the model meets codes it never saw.
 \end{block}
 \end{frame}
@@ -353,7 +353,7 @@ Test MSE, steps 1--720 & fixed & learnable & $+\,/\,-$ & learnable & Transformer
 \vspace{0.3cm}
 \begin{itemize}\small
 \item Strong, significant gains on seasonal data: Electricity, ETTh1, ETTm1 and \textbf{both electricity markets}.
-\item No consistent gain on Weather and Exchange rates (DM results of mixed sign) --- explained on the next slides.
+\item No consistent gain on Weather and Exchange rates (DM results of mixed sign) --- explained on page 22.
 \item DM column: of 6 runs (3 seeds $\times$ 2 bases), how many are significantly better\,/\,worse ($p<0.05$).
 \end{itemize}
 \end{frame}
