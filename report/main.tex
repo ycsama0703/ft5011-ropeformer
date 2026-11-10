@@ -151,7 +151,7 @@ In short, our evidence indicates that RoPE degrades beyond the training horizon 
 \clearpage
 \appendix
 \section*{Appendix A. Step-by-step replication}
-All runs used Python 3.13, PyTorch 2.6 (CUDA 12.4) on one NVIDIA H100 (memory capped at 8\%); a run takes 20 s--3 min. Code: repository \url{https://github.com/ycsama0703/ft5011-ropeformer} plus the scripts in \texttt{experiments/}.
+All runs used Python 3.13, PyTorch 2.6 (CUDA 12.4) on one NVIDIA H100 (memory capped at 8\%); a run takes 20 s--3 min. Code: repository \url{https://github.com/ycsama0703/ft5011-ropeformer}, branch \texttt{final-horizon-extrapolation}, with the scripts in \texttt{experiments/}. \textbf{Trained models and all result files} (257 checkpoints, 71 MB) are attached to the release \url{https://github.com/ycsama0703/ft5011-ropeformer/releases/tag/final-report-2026-11-10}; unzipped at the repository root, they reproduce every table and figure with \texttt{python report/make\_assets.py results} and allow the analyses in step 6 without retraining.
 \begin{enumerate}
 \item \texttt{pip install -e .} (PyTorch $\ge$2.0); \texttt{python -m unittest discover -s tests} (29 tests).
 \item Data: \texttt{python tools/download\_data.py ETTh1 ETTm1 weather electricity exchange\_rate}; financial data: \texttt{python experiments/build\_fin.py raw data} after downloading EPF (Appendix B).

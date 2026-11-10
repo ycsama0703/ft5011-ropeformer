@@ -4,6 +4,14 @@ Run everything from the repository root. Scripts in `experiments/` expect a CUDA
 wrapper that limits the process to 8% of GPU memory on a shared machine (`python experiments/capped.py <script> <args>`).
 All results land in `results/` (Git-ignored). Python 3.10+, PyTorch >= 2.0.
 
+## Trained models and results (no retraining needed)
+
+Download `ft5011-horizon-extrapolation-results.zip` from the release
+https://github.com/ycsama0703/ft5011-ropeformer/releases/tag/final-report-2026-11-10
+and unzip it at the repository root. It contains every result file (`results/*.json`) and the 257 checkpoints
+used in the report (`results/ckpt*/`, described in `results/RESULTS_README.md`). With it, step 4 below and
+`python report/make_assets.py results` run without training anything.
+
 ## 0. Setup and data
 ```bash
 pip install -e .
