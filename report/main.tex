@@ -114,13 +114,23 @@ Four observations support one explanation.
 \textbf{(1) Learning matters more than head diversity.} For extrapolation on ETTh1, one scale shared by all heads performs as well as one per head, and hand-set spreads of head scales help little or not at all (Table~\ref{tab:mech}); we found no evidence that the gain requires heads to specialise to time scales.
 \textbf{(2) The effect sits in the fast frequencies.} In the grouped variant the fast group learns almost the same value as the per-head scale, while the slow group drifts (0.95--1.13) with no measurable effect on the forecast.
 \textbf{(3) The learned value is close to the aligning value.} On ETTm1 one day is 6 tokens; the learned scales average 1.04 against the aligning $2\pi/6=1.047$. A fixed scale of 1.047 gives the same gain without learning, while 0.955 or 1.10 do not (Fig.~\ref{fig:align}; 1.047 beats 0.955 in all 6 runs, DM $p<10^{-10}$).
+During training the 24 per-head scales move from 1 towards this value (mean 1.036, Fig.~\ref{fig:reset}a), and resetting them to 1 at test time, with all other weights unchanged, brings back the failure of fixed RoPE (Fig.~\ref{fig:reset}b): the gain lives in the scales.
 \textbf{(4) Gains are larger on more seasonal series} (Fig.~\ref{fig:season}). Across channels the ratio fixed/learnable rises with daily seasonal strength \cite{wang2006}: on ETTm1 the ratio reaches 1.8 on the two most seasonal load channels, and in Weather only the three solar-radiation channels gain (ratio 1.14--1.17), which explains why Weather as a whole shows no gain.
 Across datasets the relation is clear at the extremes (Electricity largest, exchange rates none) but loose in between (EPF-PJM gains more than its seasonal strength suggests), so seasonal strength indicates where to expect a gain but does not predict its size.
-Attention is consistent with this: on ETTm1 the share of placeholder attention on history patches at the same time of day stays at 0.53 for all 7.5 days ahead with scale 1.047, but with fixed RoPE falls from 0.64 to 0.05, below the chance level of 1/6, after two days. Gradient clipping is not the cause: it is inactive after warm-up.
+\begin{figure}[h]\centering
+\includegraphics[width=\linewidth]{figures/fig7_scales_and_reset.pdf}
+\caption{ETTm1, base $10^4$. (a) The 24 learned per-head scales (8 heads $\times$ 3 seeds) during training; dashed: the day-aligned value $2\pi/6$. (b) Test MSE per step (6-hour moving average) of fixed RoPE, the learnable model, and the same learnable weights with every scale reset to 1 at test time.}
+\label{fig:reset}\end{figure}
 \begin{figure}[h]\centering
 \includegraphics{figures/fig3_periodicity.pdf}
 \caption{Gain from learnable scales (MSE ratio fixed/learnable on steps 97--720; $>1$ means learnable is better) against daily seasonal strength.}
 \label{fig:season}\end{figure}
+\textbf{Attention moves where the RoPE arithmetic predicts} (Fig.~\ref{fig:attn}). With fixed RoPE the fastest pair drifts by $6-2\pi\approx-0.28$ rad per day, so beyond the lags seen in training a same-hour patch has the code of a patch 4\,h, later 8\,h, away. The placeholders' attention follows this model-free prediction: its share on the same hour falls from 0.66 to 0.03 over 7.5 days as it shifts to $+4$\,h and then $+8$\,h, while with 1.047 it stays (0.49) and with the learned scales it decays slowly (0.38).
+Gradient clipping is not the cause: it is inactive after warm-up.
+\begin{figure}[h]\centering
+\includegraphics[width=\linewidth]{figures/fig8_attention_offset.pdf}
+\caption{Where the placeholders look (ETTm1, trained at $H{=}96$, queried at 720; last layer, mean over heads and 3 seeds). Colour: share of attention on history patches at each time-of-day offset from the forecast step. Dashed: offset predicted from RoPE arithmetic alone --- the offset whose fastest-pair angle is closest to a lag seen in training.}
+\label{fig:attn}\end{figure}
 
 \subsection{How far it goes: multi-horizon training}
 Learnable scales do not close the whole gap: on Electricity, ETTm1 and Weather the extrapolating model stays above models trained at 720 (Table~\ref{tab:ex}).
@@ -160,7 +170,7 @@ All runs used Python 3.13, PyTorch 2.6 (CUDA 12.4) on one NVIDIA H100 (memory ca
 \item Multi-horizon: \texttt{python tools/multi\_horizon.py --dataset D --steps S --train-horizons 96 192 336 720 --test-horizon 720 --out results/mh\_D.json}.
 \item Ablations (Table~\ref{tab:mech}): \texttt{extrap\_study.py} with \texttt{--modes shared\_group fixed\_head:0.9,0.97,1.03,1.1 fixed\_head:0.5,0.8,1.25,2.0} (ETTh1, 5 seeds) and \texttt{fixed\_head:1.0472,1.0472,1.0472,1.0472} etc.\ (ETTm1).
 \item Train/val/test MSE at 96, linear reference, Diebold--Mariano tests, per-channel analysis and seasonal strength: scripts \texttt{train\_eval.py}, \texttt{linear96.py}, \texttt{dm\_test.py}, \texttt{per\_channel.py}, \texttt{periodicity.py} in \texttt{experiments/} (commands in \texttt{experiments/README.md}).
-\item All tables and figures of this report: \texttt{python report/make\_assets.py}.
+\item All tables and figures of this report: \texttt{python report/make\_assets.py}; Figures~\ref{fig:reset} and \ref{fig:attn} from the released checkpoints on CPU in about 10 s: \texttt{python report/mechanism\_figures.py --results results --data-dir data} (the predicted offsets come from \texttt{report/phase\_figures.py}).
 \end{enumerate}
 Hyper-parameters: $L{=}336$, patch 16, $d{=}64$, 4 heads, 2 layers, FFN 128, dropout 0.1, batch 256, AdamW (lr $10^{-3}$, weight decay 0.01, none on scales), 300 warm-up steps then cosine decay, gradient clip 1.0, bf16 autocast; validation every 200--500 steps keeps the best state.
 
