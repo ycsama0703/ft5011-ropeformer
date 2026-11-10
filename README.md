@@ -4,6 +4,7 @@ FT5011 Deep Learning in Finance, final project (NUS, 2026).
 Liu Yuncong, Zhang Yihang, Ma Xiaoyu.
 
 **Report:** [`report/main.pdf`](report/main.pdf) (5 pages + replication appendix).
+**Slides:** [`slides/Ropeformer_Final.pdf`](slides/Ropeformer_Final.pdf).
 
 A Transformer forecaster that represents every future step by a placeholder token can be trained at one horizon
 and queried at any other. With standard rotary position encoding (RoPE) it degrades sharply beyond the training
@@ -24,6 +25,7 @@ tools/                training and evaluation
 experiments/          financial data builder, train/test MSE, linear reference, Diebold-Mariano tests,
                       per-channel analysis, seasonal strength (commands in experiments/README.md)
 report/               report source (main.tex), PDF, tables, figures and the scripts that make them
+slides/               presentation slides (Ropeformer_Final.tex / .pdf, Beamer, CleanEasy theme)
 ```
 
 ## Setup
